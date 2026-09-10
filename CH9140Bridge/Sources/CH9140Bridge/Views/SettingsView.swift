@@ -1,0 +1,194 @@
+//
+//  SettingsView.swift
+//  原生设置面板(⌘,), 含默认日志保存等设置
+//
+
+import SwiftUI
+import CH9140Core
+import AppKit
+
+struct SettingsView: View {
+    @EnvironmentObject var settings: SettingsStore
+
+    var body: some View {
+        TabView {
+            GeneralSettingsTab().environmentObject(settings)
+                .tabItem { Label("通用", systemImage: "gear") }
+            LoggingSettingsTab().environmentObject(settings)
+                .tabItem { Label("日志", systemImage: "doc.text") }
+            PortSettingsTab().environmentObject(settings)
+                .tabItem { Label("虚拟串口", systemImage: "cable.connector") }
+        }
+        .frame(width: 540, height: 380)
+    }
+}
+
+// MARK: - 通用
+
+private struct GeneralSettingsTab: View {
+    @EnvironmentObject var settings: SettingsStore
+
+    static let baudRates: [UInt32] = [
+        300, 600, 1200, 2400, 4800, 9600, 14400, 19200, 28800, 38400,
+        57600, 76800, 115200, 128000, 230400, 250000, 256000,
+        460800, 500000, 512000, 921600, 1000000
+    ]
+    static let parityNames = ["无", "奇校验", "偶校验", "标志位", "空白位"]
+
+    var body: some View {
+        Form {
+            Section {
+                Picker("默认波特率", selection: $settings.defaultBaudRate) {
+                    ForEach(Self.baudRates, id: \.self) { Text(verbatim: "\($0) bps").tag($0) }
+                }
+                Picker("默认数据位", selection: $settings.defaultDataBits) {
+                    ForEach([UInt8(5), 6, 7, 8], id: \.self) { Text(verbatim: "\($0) 位").tag($0) }
+                }
+                Picker("默认停止位", selection: $settings.defaultStopBits) {
+                    ForEach([UInt8(1), 2], id: \.self) { Text(verbatim: "\($0) 位").tag($0) }
+                }
+                Picker("默认校验", selection: $settings.defaultParity) {
+                    ForEach(0..<Self.parityNames.count, id: \.self) {
+                        Text(Self.parityNames[$0]).tag(UInt8($0))
+                    }
+                }
+                Toggle("默认开启硬件流控(CTS/RTS)", isOn: $settings.defaultFlowControl)
+            } header: {
+                Text("默认串口参数").font(.headline)
+            }
+
+            Section {
+                Toggle("连接成功后自动下发默认参数到芯片", isOn: $settings.applyDefaultsOnConnect)
+                Toggle("虚拟串口波特率变化时自动同步给芯片", isOn: $settings.followVirtualPortBaud)
+                Toggle("意外断开后自动重连", isOn: $settings.autoReconnect)
+            } header: {
+                Text("连接行为").font(.headline)
+            }
+
+            Text("提示: 华为/H3C/思科交换机 Console 通常为 9600 8N1 无校验无流控。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .formStyle(.grouped)
+        .padding()
+    }
+}
+
+// MARK: - 日志
+
+private struct LoggingSettingsTab: View {
+    @EnvironmentObject var settings: SettingsStore
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("默认保存日志(连接后自动记录会话)", isOn: $settings.logEnabled)
+                Toggle("日志中包含发送到设备的数据(TX)", isOn: $settings.logSentData)
+                    .disabled(!settings.logEnabled)
+                Toggle("每行附加时间戳与方向", isOn: $settings.logTimestamps)
+                    .disabled(!settings.logEnabled)
+                Picker("日志格式", selection: $settings.logFormat) {
+                    ForEach(LogFormat.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .disabled(!settings.logEnabled)
+                Picker("按日期存储", selection: $settings.logStorageMode) {
+                    ForEach(LogStorageMode.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .disabled(!settings.logEnabled)
+                .help("按会话: 每次连接一个文件\n按日期分目录: 每天一个子目录\n按日期合并: 同名文件持续追加(搭配含 {date} 的模板即每天一个文件)")
+                Toggle("启用「截断日志」快捷键 ⌘T", isOn: $settings.logRotateShortcutEnabled)
+                    .disabled(!settings.logEnabled)
+                Text("文件名模板与自定义标识在主界面「会话日志」卡片中编辑。")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("会话日志").font(.headline)
+            }
+
+            Section {
+                HStack {
+                    TextField("日志保存目录", text: $settings.logDirectoryPath)
+                        .textFieldStyle(.roundedBorder)
+                    Button("选择…") { pickDirectory() }
+                    Button("默认") {
+                        settings.logDirectoryPath = SettingsStore.defaultLogDirectory
+                    }
+                    .help("恢复为默认目录 ~/Documents/CH9140Logs")
+                    Button("打开") {
+                        let dir = settings.logDirectory
+                        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                        NSWorkspace.shared.open(dir)
+                    }
+                }
+                Text("示例: \(examplePath)")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            } header: {
+                Text("保存位置").font(.headline)
+            }
+
+            Text("连接设备后自动创建日志文件, 断开时自动收尾; 按日期模式下跨午夜自动切换到新文件。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .formStyle(.grouped)
+        .padding()
+    }
+
+    private var examplePath: String {
+        SessionLogger.examplePath(directory: settings.logDirectoryPath,
+                                  deviceName: "CH9140BLE2U",
+                                  customName: settings.logCustomName,
+                                  template: settings.logNameTemplate,
+                                  mode: settings.logStorageMode)
+    }
+
+    private func pickDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.prompt = "选择日志目录"
+        panel.directoryURL = settings.logDirectory
+        if panel.runModal() == .OK, let url = panel.url {
+            settings.logDirectoryPath = url.path
+        }
+    }
+}
+
+// MARK: - 虚拟串口
+
+private struct PortSettingsTab: View {
+    @EnvironmentObject var settings: SettingsStore
+
+    var body: some View {
+        Form {
+            Section {
+                TextField("串口名称", text: $settings.portName)
+                    .textFieldStyle(.roundedBorder)
+                Text("虚拟串口会创建两个符号链接:\n• ~/Library/Application Support/CH9140Bridge/cu.<名称>\n• ~/.ch9140/cu.<名称> (无空格, 兼容 minicom 等按空格分词的工具)\n在 screen / minicom / CoolTerm / PuTTY 中选择任一路径即可使用。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Toggle("App 启动时自动创建虚拟串口", isOn: $settings.autoCreatePort)
+            } header: {
+                Text("虚拟串口").font(.headline)
+            }
+
+            Section {
+                Text("""
+                工作原理: 使用 macOS 伪终端(PTY)创建虚拟串口对, 无需内核扩展。\
+                串口工具设置的波特率/数据位/停止位/校验会被自动检测并通过 0xFFF3 \
+                配置通道下发给 CH9140 芯片(需在“通用”中开启自动同步)。
+                """)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("说明").font(.headline)
+            }
+        }
+        .formStyle(.grouped)
+        .padding()
+    }
+}

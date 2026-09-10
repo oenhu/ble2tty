@@ -1,0 +1,129 @@
+//
+//  CLIRunner.swift
+//  无界面桥接模式: 扫描 -> 连接 -> 下发串口参数 -> 创建虚拟串口 -> 双向透传
+//
+
+import Foundation
+import CH9140Core
+
+enum CLIRunner {
+
+    private final class StateBox {
+        var rxBytes = 0
+        var txBytes = 0
+        var connecting = false
+        var ready = false
+    }
+
+    static func run() -> Never {
+        var name = "CH9140BLE2U"
+        var baud: UInt32 = 115200
+        var portName = "CH9140"
+        var timeout: Double = 45
+
+        var args = Array(CommandLine.arguments.dropFirst()).filter { $0 != "--cli" }
+        var i = 0
+        while i < args.count {
+            let key = args[i]
+            let value: String? = (i + 1 < args.count) ? args[i + 1] : nil
+            switch (key, value) {
+            case ("--name", let v?):       name = v;                              i += 2
+            case ("--baud", let v?):       baud = UInt32(v) ?? 115200;            i += 2
+            case ("--port-name", let v?):  portName = v;                          i += 2
+            case ("--timeout", let v?):    timeout = Double(v) ?? 45;             i += 2
+            default: i += 1
+            }
+        }
+        args.removeAll()
+
+        let ble = BLEManager()
+        let port = VirtualSerialPort()
+        let state = StateBox()
+
+        func say(_ s: String) { print(s); fflush(stdout) }
+
+        say("[CLI] 无界面桥接模式 目标设备=\(name) 波特率=\(baud)")
+
+        ble.onLog  = { say("[BLE] \($0)") }
+        port.onLog = { say("[PTY] \($0)") }
+
+        // 芯片 -> 虚拟串口
+        ble.onReceive = { data in
+            state.rxBytes += data.count
+            port.writeToPort(data)
+            say("[RX \(data.count)B] \(String(decoding: data, as: UTF8.self))")
+        }
+
+        // 虚拟串口 -> 芯片
+        port.onDataFromPort = { data in
+            state.txBytes += data.count
+            ble.send(data)
+        }
+
+        // 串口工具设置波特率 -> 自动同步给芯片(0xFFF3 / 0x06)
+        port.onBaudChange = { params in
+            say("[PTY] 串口工具设置参数 -> \(params.baudRate) bps \(params.dataBits) 数据位 \(params.stopBits) 停止位 校验 \(params.parity), 同步芯片…")
+            ble.applySerialParameters(params) { ok, info in
+                say("[BLE] 跟随同步结果: \(ok ? "成功" : "失败")(\(info))")
+            }
+        }
+
+        ble.onConnectionChange = { st in
+            switch st {
+            case .ready:
+                // 连接就绪: 先下发目标串口参数, 再创建虚拟串口
+                let p = SerialParameters(baudRate: baud, dataBits: 8, stopBits: 1, parity: 0)
+                ble.applySerialParameters(p) { ok, info in
+                    say("[BLE] 下发串口参数 \(baud) 8N1: \(ok ? "成功" : "失败")(\(info))")
+                    ble.applyModemLines(ModemLines(flowControl: false, dtr: 0, rts: 0)) { ok2, info2 in
+                        say("[BLE] 关闭流控: \(ok2 ? "成功" : "失败")(\(info2))")
+                    }
+                    do {
+                        let link = try port.open(name: portName)
+                        say("CLI_READY port=\(link) compat=\(port.compatLinkPath)")
+                        state.ready = true
+                    } catch {
+                        say("[CLI] 创建虚拟串口失败: \(error.localizedDescription)")
+                        exit(3)
+                    }
+                }
+            case .failed(let m):
+                say("[CLI] 连接失败: \(m)")
+                exit(2)
+            default:
+                break
+            }
+        }
+
+        // 开始扫描
+        ble.startScan(showAll: false)
+
+        // 扫描/连接状态机轮询
+        let start = Date()
+        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+            if state.ready || state.connecting { return }
+            if Date().timeIntervalSince(start) > timeout {
+                say("[CLI] 超时: \(Int(timeout))s 内未找到/未连上 \(name)")
+                exit(2)
+            }
+            if let dev = ble.devices.first(where: {
+                $0.name.localizedCaseInsensitiveContains(name)
+            }) {
+                state.connecting = true
+                ble.stopScan()
+                say("[CLI] 发现设备 \(dev.name) RSSI=\(dev.rssi) dBm, 连接中…")
+                ble.connect(dev)
+            }
+        }
+
+        // 每 10s 打印字节统计
+        Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { _ in
+            if state.ready {
+                say("[CLI] 统计: 芯片->串口 \(state.rxBytes)B / 串口->芯片 \(state.txBytes)B")
+            }
+        }
+
+        RunLoop.main.run()
+        fatalError("unreachable")
+    }
+}
