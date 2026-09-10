@@ -1,14 +1,10 @@
 # macOS
 .DS_Store
 
-# Swift 构建产物
+# Swift 构建产物(仅忽略构建目录; 不设 *.o/*.swiftmodule 全局规则,
+# 以免误伤 doc/ 厂商 SDK 里的预编译框架文件)
 .build/
 DerivedData/
-*.o
-*.swiftmodule
 
 # 打包产物(build_app.sh 生成)
 CH9140Bridge/CH9140Bridge.app
-
-# 厂商参考资料(约 108MB 第三方 PDF/SDK, 不入库; 如需纳入版本管理删除此行即可)
-doc/
