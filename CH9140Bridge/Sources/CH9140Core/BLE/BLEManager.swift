@@ -93,6 +93,14 @@ public final class BLEManager: NSObject, ObservableObject {
     /// 当前连接的设备 UUID(用于自动重连)
     public private(set) var connectedUUID: UUID?
 
+    // 连接超时保护: CoreBluetooth 对无响应外设可能永远不回调
+    // (CH9140 为单连接设备, 被安卓等其他主机占用时 connect 会无限挂起)
+    /// 挂起中的外设引用(peripheral 属性只在 didConnect 后才赋值, 挂起期间靠它取消)
+    private var connectingPeripheral: CBPeripheral?
+    private var connectTimeout: DispatchWorkItem?
+    /// 连接+服务发现总超时(秒)
+    private static let connectTimeoutInterval: Double = 8
+
     public override init() {
         super.init()
         _ = central   // 触发 CBCentralManager 创建
@@ -144,7 +152,7 @@ public final class BLEManager: NSObject, ObservableObject {
             self.setState(.connecting)
             self.updateMain { $0.connectedDeviceName = device.name }
             self.log("正在连接 \(device.name) …")
-            self.central.connect(p, options: nil)
+            self.startConnecting(p)
         }
     }
 
@@ -162,17 +170,46 @@ public final class BLEManager: NSObject, ObservableObject {
             self.setState(.connecting)
             self.updateMain { $0.connectedDeviceName = name }
             self.log("正在连接 \(name) …")
-            self.central.connect(p, options: nil)
+            self.startConnecting(p)
         }
+    }
+
+    /// 在 bleQueue 调用: 发起连接并启动超时保护(覆盖 连接+服务发现 全程, ready 时解除)
+    private func startConnecting(_ p: CBPeripheral) {
+        connectTimeout?.cancel()
+        connectingPeripheral = p
+        central.connect(p, options: nil)
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, self.connectingPeripheral != nil else { return }
+            self.connectingPeripheral = nil
+            self.connectTimeout = nil
+            self.central.cancelPeripheralConnection(p)
+            self.connectedUUID = nil
+            self.log("连接超时: 设备无响应(可能正被其他主机占用, CH9140 只支持单连接; 或不在范围内)")
+            self.setState(.failed("连接超时"))
+        }
+        connectTimeout = timeout
+        bleQueue.asyncAfter(deadline: .now() + Self.connectTimeoutInterval, execute: timeout)
+    }
+
+    /// 在 bleQueue 调用: 解除连接超时保护(连接就绪/失败/断开时)
+    private func disarmConnectTimeout() {
+        connectTimeout?.cancel()
+        connectTimeout = nil
+        connectingPeripheral = nil
     }
 
     public func disconnect() {
         bleQueue.async {
             self.connectedUUID = nil
-            if let p = self.peripheral {
+            let p = self.peripheral ?? self.connectingPeripheral
+            self.disarmConnectTimeout()
+            if let p {
                 self.log("主动断开连接")
                 self.central.cancelPeripheralConnection(p)
             }
+            // 取消"挂起中"的连接不会回调 didDisconnectPeripheral, 这里直接落定状态
+            self.setState(.disconnected)
         }
     }
 
@@ -398,6 +435,8 @@ extension BLEManager: CBCentralManagerDelegate {
 
     public func centralManager(_ central: CBCentralManager,
                                didFailToConnect p: CBPeripheral, error: Error?) {
+        disarmConnectTimeout()
+        connectedUUID = nil
         log("连接失败: \(error?.localizedDescription ?? "未知错误")")
         stopRSSIPolling()
         setState(.failed(error?.localizedDescription ?? "连接失败"))
@@ -407,6 +446,8 @@ extension BLEManager: CBCentralManagerDelegate {
                                didDisconnectPeripheral p: CBPeripheral, error: Error?) {
         if let error { log("连接意外断开: \(error.localizedDescription)") }
         else { log("连接已断开") }
+        disarmConnectTimeout()
+        connectedUUID = nil
         peripheral = nil
         readChar = nil; writeChar = nil; configChar = nil
         outbox.removeAll()
@@ -450,6 +491,7 @@ extension BLEManager: CBPeripheralDelegate {
             }
         }
         if readChar != nil, writeChar != nil, configChar != nil {
+            disarmConnectTimeout()
             let mtu = max(20, p.maximumWriteValueLength(for: .withoutResponse))
             log("透传通道就绪 (写入 MTU \(mtu) 字节)")
             setState(.ready)

@@ -162,9 +162,15 @@ private struct DeviceRow: View {
             }
             Spacer()
             if isConnecting {
-                ProgressView()
-                    .scaleEffect(0.6)
-                    .frame(width: 14, height: 14)
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .scaleEffect(0.6)
+                        .frame(width: 14, height: 14)
+                    Button("取消") { model.disconnect() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .help("取消正在进行的连接")
+                }
             } else if isConnected {
                 Button("断开") { model.disconnect() }
                     .buttonStyle(.bordered)
