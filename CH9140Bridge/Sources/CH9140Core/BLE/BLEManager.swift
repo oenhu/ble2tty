@@ -118,8 +118,10 @@ public final class BLEManager: NSObject, ObservableObject {
                 self.log("蓝牙未就绪(状态 \(self.central.state.rawValue)), 等待蓝牙打开…")
                 return
             }
-            self.devices.removeAll()
             self.peripherals.removeAll()
+            self.pendingDeviceUpdates.removeAll()   // 丢弃上一轮扫描的待发布残留
+            // @Published 必须在主线程更新
+            self.updateMain { $0.devices.removeAll() }
             // 注意: 部分 CH9140 固件的广播包不含 FFF0 服务 UUID,
             // 按服务过滤会漏掉设备, 因此始终全量扫描, 在发现回调中按名称/服务过滤
             self.central.scanForPeripherals(withServices: nil, options: [
@@ -176,6 +178,19 @@ public final class BLEManager: NSObject, ObservableObject {
 
     /// 在 bleQueue 调用: 发起连接并启动超时保护(覆盖 连接+服务发现 全程, ready 时解除)
     private func startConnecting(_ p: CBPeripheral) {
+        // 转连新目标前先清理旧连接: CoreBluetooth 允许同时连多个外设,
+        // 不主动断开的话旧设备的数据会继续从 FFF1 涌进来造成串流
+        if let old = connectingPeripheral, !old.isEqual(p) {
+            central.cancelPeripheralConnection(old)
+        }
+        if let old = peripheral, !old.isEqual(p) {
+            log("断开当前设备, 转连新设备")
+            central.cancelPeripheralConnection(old)
+            peripheral = nil
+            readChar = nil; writeChar = nil; configChar = nil
+            outbox.removeAll()
+            chipFullFlag = false
+        }
         connectTimeout?.cancel()
         connectingPeripheral = p
         central.connect(p, options: nil)
@@ -220,6 +235,13 @@ public final class BLEManager: NSObject, ObservableObject {
         guard !data.isEmpty else { return }
         bleQueue.async {
             self.outbox.append(data)
+            // 芯片缓冲长期满载(如流控卡死/对端不读)时防止内存无限增长: 丢弃最旧数据
+            let maxOutbox = 256 * 1024
+            if self.outbox.count > maxOutbox {
+                let overflow = self.outbox.count - maxOutbox
+                self.outbox.removeFirst(overflow)
+                self.log("芯片发送缓冲区持续满载, 发送队列溢出, 已丢弃最旧 \(overflow) 字节")
+            }
             self.pumpOutbox()
         }
     }
@@ -424,6 +446,12 @@ extension BLEManager: CBCentralManagerDelegate {
     }
 
     public func centralManager(_ central: CBCentralManager, didConnect p: CBPeripheral) {
+        // 迟到的连接成功回调(已被超时取消 / 已转连其他设备): 立即断开, 不进入发现流程
+        guard let pending = connectingPeripheral, p.isEqual(pending) else {
+            log("忽略过期连接的成功回调")
+            central.cancelPeripheralConnection(p)
+            return
+        }
         log("已连接, 正在发现服务…")
         setState(.discovering)
         peripheral = p
@@ -444,6 +472,13 @@ extension BLEManager: CBCentralManagerDelegate {
 
     public func centralManager(_ central: CBCentralManager,
                                didDisconnectPeripheral p: CBPeripheral, error: Error?) {
+        // 旧连接的迟到断连回调(已转连新设备): 不污染当前状态机
+        let isCurrent = peripheral.map { p.isEqual($0) } ?? false
+        let isPending = connectingPeripheral.map { p.isEqual($0) } ?? false
+        if !isCurrent && !isPending && (peripheral != nil || connectingPeripheral != nil) {
+            log("忽略旧设备的断连回调")
+            return
+        }
         if let error { log("连接意外断开: \(error.localizedDescription)") }
         else { log("连接已断开") }
         disarmConnectTimeout()
@@ -520,6 +555,8 @@ extension BLEManager: CBPeripheralDelegate {
 
     public func peripheral(_ p: CBPeripheral,
                            didUpdateValueFor c: CBCharacteristic, error: Error?) {
+        // 只处理当前设备的数据(防御多连接并存期间的串流)
+        guard let current = peripheral, p.isEqual(current) else { return }
         guard error == nil, let value = c.value, !value.isEmpty else {
             if let error { log("读取出错: \(error.localizedDescription)") }
             return
