@@ -50,6 +50,8 @@ public final class VirtualSerialPort: ObservableObject {
     private var worker: Thread?
     private var running = false
     private let stateLock = NSLock()
+    /// pollLoop 退出信号: close() 用它等待线程结束, 替代此前的忙等轮询
+    private let pollExitSemaphore = DispatchSemaphore(value: 0)
     private var inboundBuffer = Data()      // 待写入从设备的数据(BLE -> 串口工具)
     /// inboundBuffer 专用锁: 写入发生在 writeQueue, 而 pollLoop 也会读取,
     /// 之前两侧锁保护不一致存在数据竞争, 现统一由该锁保护
@@ -63,6 +65,12 @@ public final class VirtualSerialPort: ObservableObject {
     private var counterFlushScheduled = false
     private var lastTermios: termios?
     private let writeQueue = DispatchQueue(label: "cn.wch.CH9140Bridge.pty.write", qos: .userInitiated)
+
+    /// running 的加锁访问: close()(任意线程)写, pollLoop 线程读
+    private var isRunning: Bool {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return running }
+        set { stateLock.lock(); running = newValue; stateLock.unlock() }
+    }
 
     /// 符号链接存放目录
     public static var defaultLinkDirectory: URL {
@@ -90,14 +98,20 @@ public final class VirtualSerialPort: ObservableObject {
         if isOpen { stateLock.unlock(); return linkPath }
         stateLock.unlock()
 
+        // 净化名称: 防止路径分隔符把符号链接创建到目录之外
+        let portName = Self.sanitizedName(name)
+
         var master: Int32 = -1
         var slave: Int32 = -1
         var nameBuf = [CChar](repeating: 0, count: 128)
         guard openpty(&master, &slave, &nameBuf, nil, nil) == 0 else {
             throw PortError.openptyFailed
         }
+        // 与 close()/pollLoop 的读写保持同一把锁(此前 open 无锁赋值是不对称的)
+        stateLock.lock()
         masterFD = master
         slaveFD = slave
+        stateLock.unlock()
 
         // 主 fd 非阻塞
         let flags = fcntl(master, F_GETFL)
@@ -111,26 +125,31 @@ public final class VirtualSerialPort: ObservableObject {
         cfsetispeed(&tio, speed_t(B9600))
         cfsetospeed(&tio, speed_t(B9600))
         tcsetattr(slave, TCSANOW, &tio)
+        // 与 pollLoop 的 checkTermios 读写保持同一把锁
+        stateLock.lock()
         lastTermios = tio
+        stateLock.unlock()
 
         let path = String(cString: nameBuf)
 
         // 创建符号链接目录与链接
         let dir = Self.defaultLinkDirectory
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let link = dir.appendingPathComponent("cu.\(name)")
+        let link = dir.appendingPathComponent("cu.\(portName)")
         try? FileManager.default.removeItem(at: link)
         do {
             try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: path)
         } catch {
             Darwin.close(master); Darwin.close(slave)
+            stateLock.lock()
             masterFD = -1; slaveFD = -1
+            stateLock.unlock()
             throw PortError.symlinkFailed(error.localizedDescription)
         }
 
         // 额外的无空格兼容链接, 供 minicom 等按空格分词设备路径的工具使用
         let compatDir = Self.compatLinkDirectory
-        let compatLink = compatDir.appendingPathComponent("cu.\(name)")
+        let compatLink = compatDir.appendingPathComponent("cu.\(portName)")
         try? FileManager.default.createDirectory(at: compatDir, withIntermediateDirectories: true)
         try? FileManager.default.removeItem(at: compatLink)
         try? FileManager.default.createSymbolicLink(atPath: compatLink.path, withDestinationPath: path)
@@ -143,29 +162,41 @@ public final class VirtualSerialPort: ObservableObject {
         droppedBytes = 0
         stateLock.unlock()
 
-        running = true
         let thread = Thread { [weak self] in self?.pollLoop() }
         thread.name = "CH9140Bridge.PTYPoll"
         thread.qualityOfService = .userInitiated
+        stateLock.lock()
+        running = true
         worker = thread
+        stateLock.unlock()
         thread.start()
 
         emitLog("虚拟串口已创建: \(link.path) -> \(path)")
         return link.path
     }
 
+    /// 净化串口名: 过滤路径分隔符, 空名回退默认值
+    public static func sanitizedName(_ name: String) -> String {
+        let cleaned = name
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: "\u{0}", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? "CH9140" : cleaned
+    }
+
     public func close() {
-        running = false
-        worker?.cancel()
-        // 等待轮询线程退出, 避免关闭 fd 后仍在使用
-        if let w = worker, w.isExecuting {
-            let deadline = Date().addingTimeInterval(0.5)
-            while !w.isFinished && Date() < deadline {
-                Thread.sleep(forTimeInterval: 0.01)
-            }
-        }
-        worker = nil
         stateLock.lock()
+        let w = worker
+        stateLock.unlock()
+        isRunning = false
+        w?.cancel()
+        // 等待轮询线程退出, 避免关闭 fd 后仍在使用;
+        // poll() 最多阻塞 200ms, 用信号量高效唤醒, 不再忙等轮询占用调用线程
+        if let w, w.isExecuting {
+            _ = pollExitSemaphore.wait(timeout: .now() + 0.5)
+        }
+        stateLock.lock()
+        worker = nil
         let m = masterFD, s = slaveFD
         masterFD = -1; slaveFD = -1
         let link = linkPath
@@ -244,11 +275,12 @@ public final class VirtualSerialPort: ObservableObject {
     // MARK: - 主循环: 读取客户端数据 + 巡检波特率 + 冲刷写入缓冲
 
     private func pollLoop() {
+        defer { pollExitSemaphore.signal() }
         var fds = pollfd()
         var buf = [UInt8](repeating: 0, count: 8192)
         var lastCheck = Date.distantPast
 
-        while running && !Thread.current.isCancelled {
+        while isRunning && !Thread.current.isCancelled {
             stateLock.lock()
             let fd = masterFD
             stateLock.unlock()
@@ -293,18 +325,27 @@ public final class VirtualSerialPort: ObservableObject {
     private func checkTermios(fd: Int32) {
         var tio = termios()
         guard tcgetattr(fd, &tio) == 0 else { return }
-        defer { lastTermios = tio }
-        guard var last = lastTermios else { return }
+        stateLock.lock()
+        let last = lastTermios
+        // 无论本次是否触发同步都刷新基线, 避免"检测到变化但未同步"时每 0.5s 重复告警
+        lastTermios = tio
+        stateLock.unlock()
+        guard var last else { return }
 
         let speedChanged = cfgetispeed(&tio) != cfgetispeed(&last)
         let flagsChanged = (tio.c_cflag & (tcflag_t(CSIZE) | tcflag_t(CSTOPB) | tcflag_t(PARENB) | tcflag_t(PARODD)))
                         != (last.c_cflag & (tcflag_t(CSIZE) | tcflag_t(CSTOPB) | tcflag_t(PARENB) | tcflag_t(PARODD)))
         guard speedChanged || flagsChanged else { return }
 
-        var params = SerialParameters.default
-        if let baud = Self.baudRate(from: cfgetispeed(&tio)), baud > 0 {
-            params.baudRate = baud
+        // 波特率超出 PTY 标准可表达范围(macOS termios 上限 230400, 如经 IOSSIOSPEED
+        // 设置 460800+): 不再静默回落 9600 把错误波特率同步给芯片, 明确告警并跳过本次
+        guard let baud = Self.baudRate(from: cfgetispeed(&tio)), baud > 0 else {
+            emitLog("串口工具设置的波特率超出 macOS PTY 标准可表达范围(≤230400), 本次参数未同步给芯片")
+            return
         }
+
+        var params = SerialParameters.default
+        params.baudRate = baud
         switch tio.c_cflag & tcflag_t(CSIZE) {
         case tcflag_t(CS5): params.dataBits = 5
         case tcflag_t(CS6): params.dataBits = 6
