@@ -9,8 +9,14 @@ import CH9140Core
 enum CLIRunner {
 
     private final class StateBox {
-        var rxBytes = 0
-        var txBytes = 0
+        var rxBytes = 0        // 仅主线程读写
+        /// poll 线程写 / 主线程读, 加锁保护
+        private let txLock = NSLock()
+        private var _txBytes = 0
+        var txBytes: Int {
+            get { txLock.lock(); defer { txLock.unlock() }; return _txBytes }
+            set { txLock.lock(); _txBytes = newValue; txLock.unlock() }
+        }
         var connecting = false
         var ready = false
     }
@@ -90,6 +96,12 @@ enum CLIRunner {
             case .failed(let m):
                 say("[CLI] 连接失败: \(m)")
                 exit(2)
+            case .disconnected:
+                // CLI 不做自动重连: 连接断开(无论是否已就绪)即收尾退出,
+                // 清理虚拟串口符号链接, 避免进程变僵尸/残留链接
+                say("[CLI] 连接已断开, 退出")
+                port.close()
+                exit(4)
             default:
                 break
             }

@@ -12,6 +12,7 @@
 //   Home/End       -> ESC [ H/F
 //   PgUp/PgDn      -> ESC [ 5~ / 6~
 //   Ctrl+A..Z      -> 0x01..0x1A  (Ctrl+C = 0x03 中断)
+//   Cmd+V          -> 粘贴剪贴板文本(LF 归一化为 CR, 其余 Cmd 组合键不发给设备)
 //
 
 import SwiftUI
@@ -78,6 +79,17 @@ final class KeyCaptureNSView: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
+        // Cmd 组合键: Cmd+V 粘贴后发送; 其余交给菜单/系统处理, 不逐字节发给设备
+        // (此前 Cmd+任意键会把裸字符发到设备, 造成串扰)
+        if event.modifierFlags.contains(.command) {
+            if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+               let chars = event.charactersIgnoringModifiers,
+               chars.lowercased() == "v" {
+                pasteAndSend()
+            }
+            return
+        }
+
         // Ctrl+字母 -> 控制字符
         if event.modifierFlags.contains(.control),
            let chars = event.charactersIgnoringModifiers,
@@ -120,5 +132,14 @@ final class KeyCaptureNSView: NSView {
 
     private func send(_ data: Data) {
         onBytes?(data)
+    }
+
+    /// 粘贴: 剪贴板文本按串口 Console 惯例把换行归一为 CR 后发送
+    private func pasteAndSend() {
+        guard let text = NSPasteboard.general.string(forType: .string), !text.isEmpty else { return }
+        let normalized = text
+            .replacingOccurrences(of: "\r\n", with: "\r")
+            .replacingOccurrences(of: "\n", with: "\r")
+        send(Data(normalized.utf8))
     }
 }

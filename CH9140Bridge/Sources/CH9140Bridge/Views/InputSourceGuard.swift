@@ -15,6 +15,8 @@ final class InputSourceGuard {
     /// 开关状态(由设置同步过来)
     private(set) var isEnabled = true
     private var savedSource: TISInputSource?
+    /// enter() 时实际切换到的英文输入法(用于 leave 判断用户是否手动改过)
+    private var appliedSource: TISInputSource?
     private var active = false
 
     private init() {}
@@ -34,17 +36,23 @@ final class InputSourceGuard {
         }
         if let ascii = Self.firstASCIICapableSource() {
             TISSelectInputSource(ascii)
+            appliedSource = ascii
             active = true
         }
     }
 
-    /// 输入区失去焦点: 恢复之前的输入法
+    /// 输入区失去焦点: 恢复之前的输入法。
+    /// 若用户在聚焦期间手动切换过输入法(当前源已不是 enter 时切过去的那个),
+    /// 则尊重用户的选择, 不再恢复。
     func leave() {
         guard active else { return }
-        if let saved = savedSource {
+        let currentID = TISCopyCurrentKeyboardInputSource().flatMap { Self.sourceID($0.takeRetainedValue()) }
+        let appliedID = appliedSource.flatMap(Self.sourceID)
+        if currentID == appliedID, let saved = savedSource {
             TISSelectInputSource(saved)
         }
         savedSource = nil
+        appliedSource = nil
         active = false
     }
 
@@ -54,6 +62,11 @@ final class InputSourceGuard {
         guard let ref = TISGetInputSourceProperty(source, kTISPropertyInputSourceIsASCIICapable)
         else { return false }
         return CFBooleanGetValue(Unmanaged<CFBoolean>.fromOpaque(ref).takeUnretainedValue())
+    }
+
+    private static func sourceID(_ source: TISInputSource) -> String? {
+        guard let ref = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else { return nil }
+        return Unmanaged<CFString>.fromOpaque(ref).takeUnretainedValue() as String
     }
 
     private static func firstASCIICapableSource() -> TISInputSource? {

@@ -89,6 +89,13 @@ struct TerminalTextView: NSViewRepresentable {
                 }
                 var deleteLength = 0
                 for line in visibleLines[0..<idx] { deleteLength += render(line).length }
+                // 防御: 已渲染内容与模型失配(删除长度超出已渲染总量)时整屏重绘兜底,
+                // 避免 NSRange 越界抛 ObjC 异常崩溃
+                if deleteLength > storage.length {
+                    fullRedraw(storage: storage, coord: coord, signature: signature)
+                    if autoScroll { tv.scrollToEndOfDocument(nil) }
+                    return
+                }
                 storage.beginEditing()
                 storage.deleteCharacters(in: NSRange(location: 0, length: deleteLength))
                 storage.endEditing()
@@ -111,13 +118,18 @@ struct TerminalTextView: NSViewRepresentable {
                 // 行数未变: 校对"活"行尾, 内容不同则原地改写最后一行(增量, 不整屏重绘)
                 let rendered = render(last)
                 if rendered.string != coord.tailString {
-                    storage.beginEditing()
-                    storage.deleteCharacters(in: NSRange(location: storage.length - coord.tailLength,
-                                                         length: coord.tailLength))
-                    storage.append(rendered)
-                    storage.endEditing()
-                    coord.tailString = rendered.string
-                    coord.tailLength = rendered.length
+                    // 防御: 尾部长度超出已渲染总量(失配)时整屏重绘, 避免 NSRange 越界崩溃
+                    if coord.tailLength > storage.length {
+                        fullRedraw(storage: storage, coord: coord, signature: signature)
+                    } else {
+                        storage.beginEditing()
+                        storage.deleteCharacters(in: NSRange(location: storage.length - coord.tailLength,
+                                                             length: coord.tailLength))
+                        storage.append(rendered)
+                        storage.endEditing()
+                        coord.tailString = rendered.string
+                        coord.tailLength = rendered.length
+                    }
                 }
             }
         }
@@ -166,9 +178,10 @@ struct TerminalTextView: NSViewRepresentable {
             body = hex ? HexUtil.hexString(line.data) : HexUtil.printableASCII(line.data)
             color = .labelColor
         case .tx:
+            // 行尾换行符是发送时的行尾附加(传输修饰), 文本/HEX 两种模式一致剥离
             var d = line.data
             while d.last == 0x0D || d.last == 0x0A { d = d.dropLast() }
-            body = "→ " + (hex ? HexUtil.hexString(line.data) : HexUtil.printableASCII(d))
+            body = "→ " + (hex ? HexUtil.hexString(d) : HexUtil.printableASCII(d))
             color = .systemBlue
         }
         result.append(NSAttributedString(string: body + "\n",

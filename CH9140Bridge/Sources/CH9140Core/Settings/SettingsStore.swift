@@ -16,7 +16,8 @@ public struct RecentDevice: Codable, Equatable, Identifiable, Sendable {
 
 public final class SettingsStore: ObservableObject {
 
-    private let defaults = UserDefaults.standard
+    /// 允许注入 UserDefaults 实例(自检用独立 suite, 不触碰正式 App 的偏好域)
+    private let defaults: UserDefaults
     private func key(_ k: String) -> String { "CH9140Bridge.\(k)" }
 
     // MARK: - 串口默认参数(连接后自动下发给芯片)
@@ -145,15 +146,19 @@ public final class SettingsStore: ObservableObject {
 
     // MARK: - 初始化
 
-    public init() {
-        let d = UserDefaults.standard
-        func uint32(_ k: String, _ def: UInt32) -> UInt32 {
-            d.object(forKey: "CH9140Bridge.\(k)") != nil
-                ? UInt32(clamping: d.integer(forKey: "CH9140Bridge.\(k)")) : def
+    public init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        let d = defaults
+        // 读取即校验: 损坏/越界的持久化值回退默认值, 不再 clamp 后直接下发芯片
+        func uint32(_ k: String, _ def: UInt32, _ range: ClosedRange<UInt32>) -> UInt32 {
+            guard d.object(forKey: "CH9140Bridge.\(k)") != nil else { return def }
+            let v = UInt32(clamping: d.integer(forKey: "CH9140Bridge.\(k)"))
+            return range.contains(v) ? v : def
         }
-        func uint8(_ k: String, _ def: UInt8) -> UInt8 {
-            d.object(forKey: "CH9140Bridge.\(k)") != nil
-                ? UInt8(clamping: d.integer(forKey: "CH9140Bridge.\(k)")) : def
+        func uint8(_ k: String, _ def: UInt8, _ range: ClosedRange<UInt8>) -> UInt8 {
+            guard d.object(forKey: "CH9140Bridge.\(k)") != nil else { return def }
+            let v = UInt8(clamping: d.integer(forKey: "CH9140Bridge.\(k)"))
+            return range.contains(v) ? v : def
         }
         func bool(_ k: String, _ def: Bool) -> Bool {
             d.object(forKey: "CH9140Bridge.\(k)") != nil
@@ -161,10 +166,10 @@ public final class SettingsStore: ObservableObject {
         }
 
         // 交换机 Console 常用参数: 9600 8N1 无流控
-        defaultBaudRate = uint32("defaultBaudRate", 9600)
-        defaultDataBits = uint8("defaultDataBits", 8)
-        defaultStopBits = uint8("defaultStopBits", 1)
-        defaultParity   = uint8("defaultParity", 0)
+        defaultBaudRate = uint32("defaultBaudRate", 9600, 300...1_000_000)
+        defaultDataBits = uint8("defaultDataBits", 8, 5...8)
+        defaultStopBits = uint8("defaultStopBits", 1, 1...2)
+        defaultParity   = uint8("defaultParity", 0, 0...4)
         defaultFlowControl     = bool("defaultFlowControl", false)
         applyDefaultsOnConnect = bool("applyDefaultsOnConnect", true)
         followVirtualPortBaud  = bool("followVirtualPortBaud", true)

@@ -390,6 +390,10 @@ public final class BridgeModel: ObservableObject {
 
     /// 封尾: 插入系统消息/整行发送前调用, 之后残行再起新行
     private func flushPendings() {
+        // 吐出装配器中的残行, 使其与显示保持一致: 残行已作为"活"行尾显示,
+        // 此后同一方向的后续数据不再与它拼成一行(系统消息插入后的新片段起新行)
+        _ = rxAssembler.flushPending()
+        _ = txAssembler.flushPending()
         rxLiveTail = false
         txLiveTail = false
     }

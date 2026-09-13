@@ -146,6 +146,9 @@ check(VirtualSerialPort.baudRate(from: speed_t(B9600)) == 9600, "speed_t 映射 
 check(VirtualSerialPort.baudRate(from: speed_t(B115200)) == 115200, "speed_t 映射 B115200")
 check(VirtualSerialPort.baudRate(from: speed_t(B230400)) == 230400, "speed_t 映射 B230400")
 check(VirtualSerialPort.baudRate(from: speed_t(B0)) == 0, "speed_t 映射 B0")
+check(VirtualSerialPort.baudRate(from: speed_t(460800)) == nil, "超出 PTY 标准范围的波特率返回 nil(不回落)")
+check(VirtualSerialPort.sanitizedName("a/b") == "a-b", "串口名净化(路径分隔符)")
+check(VirtualSerialPort.sanitizedName("   ") == "CH9140", "空白串口名回退默认值")
 
 print("== SessionLogger ==")
 do {
@@ -420,32 +423,46 @@ do {
 
 print("== SettingsStore ==")
 do {
-    let d = UserDefaults.standard
-    for k in ["defaultBaudRate", "defaultDataBits", "defaultStopBits", "defaultParity",
-              "logEnabled", "logTimestamps", "logSentData", "followVirtualPortBaud"] {
-        d.removeObject(forKey: "CH9140Bridge.\(k)")
-    }
-    let s = SettingsStore()
+    // 自检使用显式注入的独立 suite, 与正式 App 的偏好域(cn.wch.CH9140Bridge)完全隔离,
+    // 结束后整域清理, 不留任何持久化残留
+    let suiteName = "CH9140SelfTest"
+    UserDefaults().removePersistentDomain(forName: suiteName)
+    let d = UserDefaults(suiteName: suiteName)!
+
+    let s = SettingsStore(defaults: d)
     check(s.defaultBaudRate == 9600 && s.defaultDataBits == 8 && s.defaultStopBits == 1 && s.defaultParity == 0,
           "默认串口参数 9600 8N1 无校验(交换机 Console)")
     check(s.logEnabled && s.logTimestamps && s.logSentData, "默认保存日志开启")
+
+    // 损坏/越界的持久化值回退默认值, 而不是 clamp 后直接下发芯片
+    d.set(300, forKey: "CH9140Bridge.defaultDataBits")   // UInt8(clamping:300) = 255
+    d.set(9,   forKey: "CH9140Bridge.defaultStopBits")
+    d.set(99,  forKey: "CH9140Bridge.defaultParity")
+    d.set(50,  forKey: "CH9140Bridge.defaultBaudRate")   // 低于 300
+    let sBad = SettingsStore(defaults: d)
+    check(sBad.defaultDataBits == 8 && sBad.defaultStopBits == 1 && sBad.defaultParity == 0 && sBad.defaultBaudRate == 9600,
+          "越界持久化值回退默认值")
+
     s.defaultBaudRate = 38400
-    let s2 = SettingsStore()
+    let s2 = SettingsStore(defaults: d)
     check(s2.defaultBaudRate == 38400, "设置持久化")
     s2.defaultBaudRate = 9600
 
     // 最近连接设备
-    let s3 = SettingsStore()
+    let s3 = SettingsStore(defaults: d)
     s3.addRecentDevice(uuid: UUID(uuidString: "8BE7B8EA-0000-0000-0000-000000000001")!, name: "CH9140BLE2U")
     s3.addRecentDevice(uuid: UUID(uuidString: "8BE7B8EA-0000-0000-0000-000000000002")!, name: "设备B")
     s3.addRecentDevice(uuid: UUID(uuidString: "8BE7B8EA-0000-0000-0000-000000000001")!, name: "CH9140BLE2U")
     check(s3.recentDevices.count == 2 && s3.recentDevices[0].name == "CH9140BLE2U",
           "最近连接去重置顶")
-    let s4 = SettingsStore()
+    let s4 = SettingsStore(defaults: d)
     check(s4.recentDevices.count == 2, "最近连接持久化")
     s4.removeRecentDevice(UUID(uuidString: "8BE7B8EA-0000-0000-0000-000000000001")!)
-    check(SettingsStore().recentDevices.count == 1, "最近连接删除并持久化")
+    check(SettingsStore(defaults: d).recentDevices.count == 1, "最近连接删除并持久化")
     s4.removeRecentDevice(UUID(uuidString: "8BE7B8EA-0000-0000-0000-000000000002")!)
+
+    // 整域清理
+    UserDefaults().removePersistentDomain(forName: suiteName)
 }
 
 print("")
