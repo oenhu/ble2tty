@@ -32,7 +32,7 @@ open CH9140Bridge.app   # 运行
 只需 Xcode Command Line Tools(无需完整 Xcode)。首次运行会弹蓝牙权限请求,
 或在 **系统设置 → 隐私与安全性 → 蓝牙** 中允许 CH9140Bridge。
 
-运行自检(30 项: 协议编解码/PTY 数据通路/日志/设置):
+运行自检(69 项: 协议编解码/PTY 数据通路/日志/行装配/设置):
 
 ```bash
 swift run CH9140SelfTest
@@ -95,7 +95,7 @@ CH9140Bridge/
 │   │   ├── Settings/            #   UserDefaults 设置
 │   │   └── BridgeModel.swift    #   粘合层
 │   ├── CH9140Bridge/            # SwiftUI App(界面)
-│   └── CH9140SelfTest/          # 自检程序(30 项断言)
+│   └── CH9140SelfTest/          # 自检程序(69 项断言)
 └── CH9140Bridge.app             # 构建产物
 ```
 
@@ -106,6 +106,10 @@ CH9140Bridge/
 | 问题 | 症状 | 修复版本 | 详细文档 |
 |------|------|----------|----------|
 | CPU 占用过高 (156%) | 电脑发热、风扇狂转 | v1.0.1 | [BUGFIX-2026-09-10-HighCPU.md](docs/BUGFIX-2026-09-10-HighCPU.md) |
+| UI 渲染/状态栏刷新开销 | 大数据量时界面卡顿 | v1.0.2 | [PERF-2026-09-10-UIRenderingAndThrottling.md](docs/PERF-2026-09-10-UIRenderingAndThrottling.md) |
+| 连接按钮永久卡灰 | 设备无响应后无法再次连接, 只能重启 App | v1.0.3 | [BUGFIX-2026-09-12-ConnectButtonStuck.md](docs/BUGFIX-2026-09-12-ConnectButtonStuck.md) |
+| 扫描列表后台线程发布/发送队列无上限/转连不断旧连接 | UI 未定义行为、内存增长、多设备数据串流 | v1.0.4 | 见 v1.0.4 提交说明 |
+| 自动重连失效/陈旧数据复活/跨线程状态竞争/断开重复事件等 | 连接失败后不重连、断连期间积压数据发给新设备等 | v1.0.5 | [BUGFIX-2026-09-13-CodeAudit.md](docs/BUGFIX-2026-09-13-CodeAudit.md) |
 
 ### 常见问题
 
