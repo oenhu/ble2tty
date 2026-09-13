@@ -90,8 +90,16 @@ public final class BLEManager: NSObject, ObservableObject {
     /// 设备列表发布节奏(秒)
     private static let deviceFlushInterval: Double = 0.4
 
-    /// 当前连接的设备 UUID(用于自动重连)
-    public private(set) var connectedUUID: UUID?
+    /// 当前连接的设备 UUID(用于 UI 高亮/自动重连)。
+    /// 统一在主线程写入(@Published 要求), bleQueue 侧的连接判定用 activePeripheralID。
+    @Published public private(set) var connectedUUID: UUID?
+
+    /// 仅在 bleQueue 读写的"透传通道就绪"标志。
+    /// bleQueue 上的收发/配置逻辑不再跨线程读 connectionState(主线程写)。
+    private var isReadyOnQueue = false
+    /// 当前活动连接的外设标识(仅 bleQueue): 识别迟到的过期回调
+    /// (超时取消 / 手动断开挂起连接 / 已转连其他设备后的迟到事件)
+    private var activePeripheralID: UUID?
 
     // 连接超时保护: CoreBluetooth 对无响应外设可能永远不回调
     // (CH9140 为单连接设备, 被安卓等其他主机占用时 connect 会无限挂起)
@@ -150,7 +158,8 @@ public final class BLEManager: NSObject, ObservableObject {
                 return
             }
             if self.central.isScanning { self.central.stopScan(); self.updateMain { $0.isScanning = false } }
-            self.connectedUUID = device.id
+            self.activePeripheralID = device.id
+            self.updateMain { $0.connectedUUID = device.id }
             self.setState(.connecting)
             self.updateMain { $0.connectedDeviceName = device.name }
             self.log("正在连接 \(device.name) …")
@@ -168,7 +177,8 @@ public final class BLEManager: NSObject, ObservableObject {
             }
             self.peripherals[uuid] = p
             if self.central.isScanning { self.central.stopScan(); self.updateMain { $0.isScanning = false } }
-            self.connectedUUID = uuid
+            self.activePeripheralID = uuid
+            self.updateMain { $0.connectedUUID = uuid }
             self.setState(.connecting)
             self.updateMain { $0.connectedDeviceName = name }
             self.log("正在连接 \(name) …")
@@ -178,6 +188,7 @@ public final class BLEManager: NSObject, ObservableObject {
 
     /// 在 bleQueue 调用: 发起连接并启动超时保护(覆盖 连接+服务发现 全程, ready 时解除)
     private func startConnecting(_ p: CBPeripheral) {
+        isReadyOnQueue = false
         // 转连新目标前先清理旧连接: CoreBluetooth 允许同时连多个外设,
         // 不主动断开的话旧设备的数据会继续从 FFF1 涌进来造成串流
         if let old = connectingPeripheral, !old.isEqual(p) {
@@ -199,8 +210,10 @@ public final class BLEManager: NSObject, ObservableObject {
             self.connectingPeripheral = nil
             self.connectTimeout = nil
             self.central.cancelPeripheralConnection(p)
-            self.connectedUUID = nil
-            self.log("连接超时: 设备无响应(可能正被其他主机占用, CH9140 只支持单连接; 或不在范围内)")
+            self.activePeripheralID = nil
+            self.isReadyOnQueue = false
+            self.updateMain { $0.connectedUUID = nil }
+            self.log("连接超时: 设备无响应(可能正被其他主机占用, CH9140 只支持单连接; 不在范围内; 或固件缺少 FFF1/FFF2/FFF3 透传特征)")
             self.setState(.failed("连接超时"))
         }
         connectTimeout = timeout
@@ -216,15 +229,27 @@ public final class BLEManager: NSObject, ObservableObject {
 
     public func disconnect() {
         bleQueue.async {
-            self.connectedUUID = nil
+            self.updateMain { $0.connectedUUID = nil }
             let p = self.peripheral ?? self.connectingPeripheral
             self.disarmConnectTimeout()
+            let wasEstablished = self.peripheral != nil
             if let p {
                 self.log("主动断开连接")
                 self.central.cancelPeripheralConnection(p)
             }
-            // 取消"挂起中"的连接不会回调 didDisconnectPeripheral, 这里直接落定状态
-            self.setState(.disconnected)
+            if !wasEstablished {
+                // 挂起中的连接取消后不会回调 didDisconnectPeripheral, 这里直接落定状态;
+                // activePeripheralID 同时清空, 使迟到的断连回调被识别为过期事件
+                self.activePeripheralID = nil
+                self.isReadyOnQueue = false
+                self.peripheral = nil
+                self.readChar = nil; self.writeChar = nil; self.configChar = nil
+                self.outbox.removeAll()
+                self.chipFullFlag = false
+                self.stopRSSIPolling()
+                self.setState(.disconnected)
+            }
+            // 已建立连接的取消: 状态由 didDisconnectPeripheral 回调统一落定(避免双重事件)
         }
     }
 
@@ -234,6 +259,9 @@ public final class BLEManager: NSObject, ObservableObject {
     public func send(_ data: Data) {
         guard !data.isEmpty else { return }
         bleQueue.async {
+            // 仅在透传通道就绪时排队: 断连期间(如串口工具仍在写虚拟串口)的数据
+            // 直接丢弃, 防止陈旧数据在下次连接时"复活"发给新连接的设备
+            guard self.isReadyOnQueue else { return }
             self.outbox.append(data)
             // 芯片缓冲长期满载(如流控卡死/对端不读)时防止内存无限增长: 丢弃最旧数据
             let maxOutbox = 256 * 1024
@@ -264,7 +292,7 @@ public final class BLEManager: NSObject, ObservableObject {
     public func applySerialParameters(_ params: SerialParameters,
                                       completion: @escaping (Bool, String) -> Void) {
         bleQueue.async {
-            guard let p = self.peripheral, let cc = self.configChar, self.connectionState == .ready else {
+            guard let p = self.peripheral, let cc = self.configChar, self.isReadyOnQueue else {
                 DispatchQueue.main.async { completion(false, "配置通道不可用(未连接)") }
                 return
             }
@@ -291,7 +319,7 @@ public final class BLEManager: NSObject, ObservableObject {
     public func applyModemLines(_ lines: ModemLines,
                                 completion: @escaping (Bool, String) -> Void) {
         bleQueue.async {
-            guard let p = self.peripheral, let cc = self.configChar, self.connectionState == .ready else {
+            guard let p = self.peripheral, let cc = self.configChar, self.isReadyOnQueue else {
                 DispatchQueue.main.async { completion(false, "配置通道不可用(未连接)") }
                 return
             }
@@ -453,6 +481,9 @@ extension BLEManager: CBCentralManagerDelegate {
             return
         }
         log("已连接, 正在发现服务…")
+        // 新会话从清空发送队列开始: 断连期间积压的数据不带入新连接
+        outbox.removeAll()
+        chipFullFlag = false
         setState(.discovering)
         peripheral = p
         p.delegate = self
@@ -464,7 +495,9 @@ extension BLEManager: CBCentralManagerDelegate {
     public func centralManager(_ central: CBCentralManager,
                                didFailToConnect p: CBPeripheral, error: Error?) {
         disarmConnectTimeout()
-        connectedUUID = nil
+        activePeripheralID = nil
+        isReadyOnQueue = false
+        updateMain { $0.connectedUUID = nil }
         log("连接失败: \(error?.localizedDescription ?? "未知错误")")
         stopRSSIPolling()
         setState(.failed(error?.localizedDescription ?? "连接失败"))
@@ -472,17 +505,18 @@ extension BLEManager: CBCentralManagerDelegate {
 
     public func centralManager(_ central: CBCentralManager,
                                didDisconnectPeripheral p: CBPeripheral, error: Error?) {
-        // 旧连接的迟到断连回调(已转连新设备): 不污染当前状态机
-        let isCurrent = peripheral.map { p.isEqual($0) } ?? false
-        let isPending = connectingPeripheral.map { p.isEqual($0) } ?? false
-        if !isCurrent && !isPending && (peripheral != nil || connectingPeripheral != nil) {
-            log("忽略旧设备的断连回调")
+        // 过期回调统一由 activePeripheralID 识别:
+        // 超时取消后 / 手动断开挂起连接后 / 已转连新设备后的迟到断连事件
+        guard activePeripheralID == p.identifier else {
+            log("忽略过期连接的断连回调")
             return
         }
         if let error { log("连接意外断开: \(error.localizedDescription)") }
         else { log("连接已断开") }
         disarmConnectTimeout()
-        connectedUUID = nil
+        activePeripheralID = nil
+        isReadyOnQueue = false
+        updateMain { $0.connectedUUID = nil }
         peripheral = nil
         readChar = nil; writeChar = nil; configChar = nil
         outbox.removeAll()
@@ -527,9 +561,20 @@ extension BLEManager: CBPeripheralDelegate {
         }
         if readChar != nil, writeChar != nil, configChar != nil {
             disarmConnectTimeout()
+            isReadyOnQueue = true
             let mtu = max(20, p.maximumWriteValueLength(for: .withoutResponse))
             log("透传通道就绪 (写入 MTU \(mtu) 字节)")
             setState(.ready)
+        } else if service.uuid.uuidString.uppercased() == CH9140UUID.service {
+            // 特征不全: 明确指出缺了什么, 避免用户只看到误导性的"连接超时"
+            let missing = [
+                readChar == nil ? CH9140UUID.readCharacteristic : nil,
+                writeChar == nil ? CH9140UUID.writeCharacteristic : nil,
+                configChar == nil ? CH9140UUID.configCharacteristic : nil
+            ].compactMap { $0 }
+            if !missing.isEmpty {
+                log("透传服务缺少特征: \(missing.joined(separator: " / " )), 无法就绪(将按连接超时处理)")
+            }
         }
     }
 

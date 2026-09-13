@@ -194,7 +194,15 @@ public final class BridgeModel: ObservableObject {
                 if self.settings.autoReconnect, let target = self.reconnectTarget {
                     self.appendSystem("2 秒后尝试自动重连 \(target.name) …")
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-                        guard let self, self.ble.connectionState == .disconnected else { return }
+                        guard let self else { return }
+                        // 排除进行态与已恢复连接即可; .failed 是连接尝试的常见终态,
+                        // 也要放行重连(否则超时/失败后重连承诺永不兑现)
+                        switch self.ble.connectionState {
+                        case .connecting, .discovering, .ready:
+                            return
+                        case .disconnected, .failed:
+                            break
+                        }
                         self.ble.connect(uuid: target.uuid, name: target.name)
                     }
                 }
