@@ -27,6 +27,8 @@ struct SettingsView: View {
 
 private struct GeneralSettingsTab: View {
     @EnvironmentObject var settings: SettingsStore
+    /// 终端毛玻璃(SwiftTermView 读同一键, 无需经 SettingsStore 中转)
+    @AppStorage("CH9140Bridge.terminalFrostedGlass") private var terminalFrostedGlass = false
 
     static let baudRates: [UInt32] = [
         300, 600, 1200, 2400, 4800, 9600, 14400, 19200, 28800, 38400,
@@ -63,6 +65,15 @@ private struct GeneralSettingsTab: View {
                 Toggle("意外断开后自动重连", isOn: $settings.autoReconnect)
             } header: {
                 Text("连接行为").font(.headline)
+            }
+
+            Section {
+                Toggle("终端毛玻璃效果", isOn: $terminalFrostedGlass)
+                Text("「终端」页背景变为半透明模糊并压暗以保证可读性; 仅影响终端仿真模式, 监视模式不受影响。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("终端").font(.headline)
             }
 
             Text("提示: 华为/H3C/思科交换机 Console 通常为 9600 8N1 无校验无流控。")
