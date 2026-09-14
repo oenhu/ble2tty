@@ -39,9 +39,10 @@ public final class SessionLogger: ObservableObject {
 
     private let queue = DispatchQueue(label: "cn.wch.CH9140Bridge.logger", qos: .utility)
     private var handle: FileHandle?
-    /// 纯文本日志模式下, RX/TX 流各自是否处于行首(只在行首插入时间戳前缀, 保证字节精确)
-    private var rxAtLineStart = true
-    private var txAtLineStart = true
+    /// 文件流是否处于行首("行首"是文件流的属性, 全局只维护一份)
+    private var lineAtStart = true
+    /// 当前开放物理行所属方向(仅 lineAtStart == false 时有意义)
+    private var lineDirection: LogDirection? = nil
 
     // 当前会话上下文(用于切割与跨午夜自动切换)
     private var mode: LogStorageMode = .perSession
@@ -170,8 +171,8 @@ public final class SessionLogger: ObservableObject {
             if fileExists { h.seekToEndOfFile() }   // 追加模式续写
             self.handle = h
             self.openedDayStamp = day
-            self.rxAtLineStart = true
-            self.txAtLineStart = true
+            self.lineAtStart = true
+            self.lineDirection = nil
 
             var bannerText = """
 
@@ -180,6 +181,9 @@ public final class SessionLogger: ObservableObject {
              设备: \(deviceName ?? "未知")
              开始时间: \(Self.lineStampFormatter.string(from: now))
              \(header)
+             格式: 每行以 [时间] [方向] 开头(RX=芯片→主机, TX=主机→芯片);
+                   行尾 "⏎" 表示该行无线上换行符, 因方向切换或会话收尾被强制断行。
+
             """
             if let note = bannerNote { bannerText += "     (\(note))\n" }
             bannerText += "============================================================\n\n"
@@ -193,6 +197,11 @@ public final class SessionLogger: ObservableObject {
 
     private func closeLocked() {
         if let h = handle {
+            if !self.lineAtStart {                    // 仅 ASCII+时间戳路径会置 false, 其他模式恒 true 不受影响
+                h.write(Data(" ⏎\n".utf8))
+                self.lineAtStart = true
+                self.lineDirection = nil
+            }
             let footer = "\n----- 会话结束 \(Self.lineStampFormatter.string(from: Date())) -----\n"
             h.write(Data(footer.utf8))
             try? h.close()
@@ -232,27 +241,32 @@ public final class SessionLogger: ObservableObject {
             var out = Data()
             switch format {
             case .ascii:
-                // 纯文本: 字节精确写入, 不追加额外换行; 时间戳只出现在行首
+                // 纯文本: 只在行首插入时间戳前缀; 方向切换时未闭合的行先补 ⏎ 强制断行,
+                // 保证每个物理行只含一个方向且行首必有前缀(不变式见文件 banner 图例)
                 if timestamps {
-                    var atLineStart = (direction == .rx) ? self.rxAtLineStart : self.txAtLineStart
                     let prefix = Data("[\(Self.lineStampFormatter.string(from: Date()))] [\(direction.rawValue)] ".utf8)
                     var rest = data[...]
                     while !rest.isEmpty {
-                        if atLineStart {
+                        if !self.lineAtStart, let lineDir = self.lineDirection, lineDir != direction {
+                            out.append(Data(" ⏎\n".utf8))      // 方向切换: 强制闭合上一行
+                            self.lineAtStart = true
+                            self.lineDirection = nil
+                        }
+                        if self.lineAtStart {
                             out.append(prefix)
-                            atLineStart = false
+                            self.lineAtStart = false
+                            self.lineDirection = direction
                         }
                         if let nl = rest.firstIndex(of: 0x0A) {
                             out.append(rest[...nl])
                             rest = rest[rest.index(after: nl)...]
-                            atLineStart = true
+                            self.lineAtStart = true
+                            self.lineDirection = nil
                         } else {
                             out.append(rest)
                             rest = rest[rest.endIndex...]
                         }
                     }
-                    if direction == .rx { self.rxAtLineStart = atLineStart }
-                    else { self.txAtLineStart = atLineStart }
                 } else {
                     out.append(data)
                 }

@@ -272,6 +272,36 @@ do {
     try? FileManager.default.removeItem(at: dir)
 }
 
+print("== SessionLogger TX/RX 行隔离 ==")
+do {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("CH9140SelfTest-\(UUID().uuidString)")
+    let logger = SessionLogger()
+    logger.openSession(directory: dir, deviceName: "T", header: "行隔离")
+    // 复现序列: RX 开放行(无 \n) → TX 无 \n → RX 回显
+    logger.log(Data("Ruijie> ".utf8),      direction: .rx, format: .ascii, timestamps: true)
+    logger.log(Data("show clock\r".utf8),  direction: .tx, format: .ascii, timestamps: true)
+    logger.log(Data("16:30:36 UTC\r\n".utf8), direction: .rx, format: .ascii, timestamps: true)
+    logger.log(Data("abc\r".utf8),         direction: .tx, format: .ascii, timestamps: true)
+    logger.closeSession()
+    Thread.sleep(forTimeInterval: 0.8)
+
+    let f = try FileManager.default.contentsOfDirectory(atPath: dir.path).first!
+    let text = try String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)
+    let dataLines = text.components(separatedBy: "\n")
+        .filter { !$0.isEmpty && !$0.hasPrefix("=") && !$0.hasPrefix(" ")
+                  && !$0.hasPrefix("-----") && $0 != "⏎" }
+    let allPrefixed = dataLines.allSatisfy {
+        $0.hasPrefix("[") && ($0.contains("] [RX] ") || $0.contains("] [TX] ")) }
+    check(allPrefixed, "每个数据行均有方向前缀")
+    check(text.contains("[TX] show clock"), "无换行 TX 有独立行与前缀")
+    check(!text.contains("show clock\r["), "无跨方向粘连")
+    check(text.contains("⏎"), "强制断行有可见标记")
+    try? FileManager.default.removeItem(at: dir)
+} catch {
+    check(false, "TX/RX 行隔离", error.localizedDescription)
+}
+
 print("== 文件名模板解析 ==")
 do {
     let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd HH:mm:ss"
