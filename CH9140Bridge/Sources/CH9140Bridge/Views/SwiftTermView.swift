@@ -145,7 +145,7 @@ struct SwiftTermView: NSViewRepresentable {
         context.coordinator.setFrosted(frostedGlass)
 
         // 欢迎横幅
-        tv.feed(text: "\u{1B}[36m● CH9140 交互终端 (SwiftTerm) —— 连接设备后直接打字即可\u{1B}[0m\r\n")
+        tv.feed(text: "\u{1B}[36mCH9140 interactive terminal ready. Keystrokes go to the connected device.\u{1B}[0m\r\n")
         return container
     }
 

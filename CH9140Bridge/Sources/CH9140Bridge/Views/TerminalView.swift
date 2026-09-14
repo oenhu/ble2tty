@@ -299,9 +299,9 @@ struct TerminalView: View {
             .onChange(of: ble.connectionState) { state in
                 switch state {
                 case .ready:
-                    termFeeder.feed(Data("\u{1B}[32m● 已连接 \(ble.connectedDeviceName), 通道就绪\u{1B}[0m\r\n".utf8))
+                    termFeeder.feed(Data("\u{1B}[32mConnected: \(ble.connectedDeviceName), transparent channel ready\u{1B}[0m\r\n".utf8))
                 case .disconnected:
-                    termFeeder.feed(Data("\u{1B}[31m● 连接已断开\u{1B}[0m\r\n".utf8))
+                    termFeeder.feed(Data("\u{1B}[31mDisconnected\u{1B}[0m\r\n".utf8))
                 default:
                     break
                 }
