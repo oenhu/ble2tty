@@ -11,6 +11,8 @@ struct DeviceListView: View {
     @EnvironmentObject var model: BridgeModel
     @EnvironmentObject var ble: BLEManager
     @EnvironmentObject var settings: SettingsStore
+    @EnvironmentObject var port: VirtualSerialPort
+    @EnvironmentObject var logger: SessionLogger
 
     var body: some View {
         VStack(spacing: 0) {
@@ -101,6 +103,19 @@ struct DeviceListView: View {
                 }
                 .listStyle(.sidebar)
             }
+
+            Divider()
+
+            // 面板区(原中间栏): MODEM 与流控 / 虚拟串口 / 会话日志
+            ScrollView {
+                VStack(spacing: 12) {
+                    ModemSectionView()
+                    VirtualPortSectionView()
+                    LoggingSectionView()
+                }
+                .padding(10)
+            }
+            .frame(minHeight: 160)
 
             Divider()
 

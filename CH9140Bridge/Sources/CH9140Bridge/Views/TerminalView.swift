@@ -203,6 +203,22 @@ struct TerminalView: View {
     @EnvironmentObject var settings: SettingsStore
     @StateObject private var termFeeder = TermFeeder()
 
+    static let baudRates: [UInt32] = [
+        300, 600, 1200, 2400, 4800, 9600, 14400, 19200, 28800, 38400,
+        57600, 76800, 115200, 128000, 230400, 250000, 256000,
+        460800, 500000, 512000, 921600, 1000000
+    ]
+    static let parityShort = ["无", "奇", "偶", "标志", "空白"]
+
+    /// 「写入芯片」的提示: 含最近一次成功下发到芯片的参数
+    private var writeChipHelp: String {
+        var tip = "通过 0xFFF3 配置通道下发串口参数(指令 0x06), 芯片回包校验"
+        if let active = model.activeSerial {
+            tip += "\n芯片当前: \(active.baudRate)/\(active.dataBits)/\(active.stopBits)/\(Self.parityShort[Int(min(active.parity, 4))])"
+        }
+        return tip
+    }
+
     @State private var mode: TerminalMode = .monitor
     @State private var input = ""
     @State private var inputHex = false
@@ -217,16 +233,56 @@ struct TerminalView: View {
         hideSystem ? model.dataLines.count : model.lines.count
     }
 
+    /// 串口参数横排(原中间栏, 挪到「监视/终端」按钮右侧依序排开)
+    private var serialStrip: some View {
+        HStack(spacing: 5) {
+            Divider().frame(height: 14)
+            Picker("", selection: $model.editBaudRate) {
+                ForEach(Self.baudRates, id: \.self) { Text(verbatim: "\($0)").tag($0) }
+            }
+            .labelsHidden()
+            .frame(width: 74)
+            .help("波特率")
+            Picker("", selection: $model.editDataBits) {
+                ForEach([UInt8(5), 6, 7, 8], id: \.self) { Text(verbatim: "\($0)").tag($0) }
+            }
+            .labelsHidden()
+            .frame(width: 40)
+            .help("数据位")
+            Picker("", selection: $model.editStopBits) {
+                ForEach([UInt8(1), 2], id: \.self) { Text(verbatim: "\($0)").tag($0) }
+            }
+            .labelsHidden()
+            .frame(width: 40)
+            .help("停止位")
+            Picker("", selection: $model.editParity) {
+                ForEach(0..<Self.parityShort.count, id: \.self) {
+                    Text(Self.parityShort[$0]).tag(UInt8($0))
+                }
+            }
+            .labelsHidden()
+            .frame(width: 56)
+            .help("校验位")
+            Button(model.applyingConfig ? "配置中…" : "写入芯片") {
+                model.applySerialParameters()
+            }
+            .disabled(!ble.isReady || model.applyingConfig)
+            .help(writeChipHelp)
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // 工具条
-            HStack(spacing: 12) {
+            HStack(spacing: 8) {
                 Picker("", selection: $mode) {
                     ForEach(TerminalMode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .frame(width: 110)
+
+                serialStrip
 
                 if mode == .monitor {
                     Toggle("HEX", isOn: $model.displayHex).toggleStyle(.checkbox)

@@ -1,130 +1,20 @@
 //
-//  ControlPanelView.swift
-//  控制面板: 串口参数 / MODEM 状态 / 虚拟串口 / 日志
+//  PanelSections.swift
+//  左侧面板区块(原中间栏控制面板拆分): MODEM 与流控 / 虚拟串口 / 会话日志
+//  串口参数横排到了终端工具条(见 TerminalView.serialStrip)
 //
 
 import SwiftUI
 import CH9140Core
 import AppKit
 
-struct ControlPanelView: View {
+// MARK: - MODEM 与流控
+
+struct ModemSectionView: View {
     @EnvironmentObject var model: BridgeModel
     @EnvironmentObject var ble: BLEManager
-    @EnvironmentObject var port: VirtualSerialPort
-    @EnvironmentObject var logger: SessionLogger
-    @EnvironmentObject var settings: SettingsStore
-    @StateObject private var templateInsertion = TextFieldInsertion()
-
-    /// 模板变量按钮定义
-    static let templateVariables: [(token: String, tip: String)] = [
-        ("{device}",   "设备名, 如 CH9140BLE2U"),
-        ("{name}",     "自定义标识(下方输入框的内容), 如 机房A-SW01"),
-        ("{date}",     "日期, 如 2026-09-05"),
-        ("{time}",     "时间, 如 184430"),
-        ("{datetime}", "日期时间, 如 20260905_184430"),
-        ("{seq}",      "当日切割序号, 如 1、2(切割时自动递增)"),
-    ]
-
-    static let baudRates: [UInt32] = [
-        300, 600, 1200, 2400, 4800, 9600, 14400, 19200, 28800, 38400,
-        57600, 76800, 115200, 128000, 230400, 250000, 256000,
-        460800, 500000, 512000, 921600, 1000000
-    ]
-    static let parityNames = ["无", "奇校验", "偶校验", "标志位", "空白位"]
-    static let parityShort = ["无", "奇", "偶", "标志", "空白"]
 
     var body: some View {
-        ScrollView {
-            VStack(spacing: 12) {
-                serialSection
-                modemSection
-                virtualPortSection
-                loggingSection
-                Spacer(minLength: 0)
-            }
-            .padding(10)
-        }
-        .background(Color(nsColor: .controlBackgroundColor))
-    }
-
-    // MARK: - 串口参数
-
-    private var serialSection: some View {
-        GroupBox {
-            VStack(spacing: 10) {
-                HStack(spacing: 8) {
-                    paramField("波特率") {
-                        Picker("", selection: $model.editBaudRate) {
-                            ForEach(Self.baudRates, id: \.self) {
-                                Text(verbatim: "\($0)").tag($0)
-                            }
-                        }
-                        .labelsHidden()
-                    }
-                    paramField("数据位") {
-                        Picker("", selection: $model.editDataBits) {
-                            ForEach([UInt8(5), 6, 7, 8], id: \.self) { Text(verbatim: "\($0)").tag($0) }
-                        }
-                        .labelsHidden()
-                    }
-                }
-                HStack(spacing: 8) {
-                    paramField("停止位") {
-                        Picker("", selection: $model.editStopBits) {
-                            ForEach([UInt8(1), 2], id: \.self) { Text(verbatim: "\($0)").tag($0) }
-                        }
-                        .labelsHidden()
-                    }
-                    paramField("校验位") {
-                        Picker("", selection: $model.editParity) {
-                            ForEach(0..<Self.parityShort.count, id: \.self) {
-                                Text(Self.parityShort[$0]).tag(UInt8($0))
-                            }
-                        }
-                        .labelsHidden()
-                    }
-                }
-
-                HStack(spacing: 8) {
-                    Button {
-                        model.applySerialParameters()
-                    } label: {
-                        Text(model.applyingConfig ? "配置中…" : "写入芯片")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!ble.isReady || model.applyingConfig)
-                    .help("通过 0xFFF3 配置通道下发串口参数(指令 0x06), 芯片回包校验")
-
-                    if let active = model.activeSerial {
-                        Text(verbatim: "芯片: \(active.baudRate)/\(active.dataBits)/\(active.stopBits)/\(Self.parityShort[Int(min(active.parity, 4))])")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .help("最近一次成功写入芯片的串口参数")
-                    }
-                }
-            }
-            .padding(.vertical, 2)
-        } label: {
-            Label("串口参数", systemImage: "slider.horizontal.3")
-        }
-    }
-
-    /// 上标题下控件的紧凑字段
-    private func paramField<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            content()
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    // MARK: - MODEM
-
-    private var modemSection: some View {
         GroupBox {
             VStack(spacing: 10) {
                 // 指示灯 + 应用按钮 一行
@@ -182,10 +72,15 @@ struct ControlPanelView: View {
         }
         .help(tip)
     }
+}
 
-    // MARK: - 虚拟串口
+// MARK: - 虚拟串口
 
-    private var virtualPortSection: some View {
+struct VirtualPortSectionView: View {
+    @EnvironmentObject var port: VirtualSerialPort
+    @EnvironmentObject var settings: SettingsStore
+
+    var body: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 8) {
                 if port.isOpen {
@@ -249,10 +144,28 @@ struct ControlPanelView: View {
             Label("虚拟串口", systemImage: "cable.connector")
         }
     }
+}
 
-    // MARK: - 日志
+// MARK: - 会话日志
 
-    private var loggingSection: some View {
+struct LoggingSectionView: View {
+    @EnvironmentObject var model: BridgeModel
+    @EnvironmentObject var ble: BLEManager
+    @EnvironmentObject var logger: SessionLogger
+    @EnvironmentObject var settings: SettingsStore
+    @StateObject private var templateInsertion = TextFieldInsertion()
+
+    /// 模板变量按钮定义
+    static let templateVariables: [(token: String, tip: String)] = [
+        ("{device}",   "设备名, 如 CH9140BLE2U"),
+        ("{name}",     "自定义标识(下方输入框的内容), 如 机房A-SW01"),
+        ("{date}",     "日期, 如 2026-09-05"),
+        ("{time}",     "时间, 如 184430"),
+        ("{datetime}", "日期时间, 如 20260905_184430"),
+        ("{seq}",      "当日切割序号, 如 1、2(切割时自动递增)"),
+    ]
+
+    var body: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 8) {
                 // 状态行

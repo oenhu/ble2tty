@@ -1,6 +1,7 @@
 //
 //  ContentView.swift
-//  主界面: 设备列表 | 控制面板 | 数据终端 三栏, 底部全局状态栏
+//  主界面: 设备与面板 | 数据终端 两栏, 底部全局状态栏
+//  (MODEM/虚拟串口/会话日志在左栏; 串口参数横排在终端工具条)
 //  使用 HSplitView 保证各栏最小宽度始终生效(窗口最小尺寸 = 各栏最小宽度之和)
 //
 
@@ -17,12 +18,10 @@ struct ContentView: View {
             HSplitView {
                 if showDeviceList {
                     DeviceListView()
-                        .frame(minWidth: 220, idealWidth: 250, maxWidth: 320)
+                        .frame(minWidth: 240, idealWidth: 290, maxWidth: 360)
                 }
-                ControlPanelView()
-                    .frame(minWidth: 290, idealWidth: 320, maxWidth: 400)
                 TerminalView()
-                    .frame(minWidth: 420)
+                    .frame(minWidth: 850)
             }
             Divider()
             StatusBarView()
