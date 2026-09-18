@@ -202,6 +202,11 @@ public final class SessionLogger: ObservableObject {
                 self.lineAtStart = true
                 self.lineDirection = nil
             }
+            // 转码暂存的半个字符等不到下文了: 以 U+FFFD 标记落盘, 不静默丢字节
+            for (_, carry) in self.textCarry where !carry.isEmpty {
+                h.write(Data("\u{FFFD}".utf8))
+            }
+            self.textCarry.removeAll()
             let footer = "\n----- 会话结束 \(Self.lineStampFormatter.string(from: Date())) -----\n"
             h.write(Data(footer.utf8))
             try? h.close()
@@ -226,7 +231,8 @@ public final class SessionLogger: ObservableObject {
 
     // MARK: - 写入
 
-    public func log(_ data: Data, direction: LogDirection, format: LogFormat, timestamps: Bool) {
+    public func log(_ data: Data, direction: LogDirection, format: LogFormat, timestamps: Bool,
+                    decodeGBK: Bool = false) {
         guard !data.isEmpty else { return }
         queue.async {
             // 按日期模式跨午夜自动切换到新文件
@@ -243,6 +249,9 @@ public final class SessionLogger: ObservableObject {
             case .ascii:
                 // 纯文本: 只在行首插入时间戳前缀; 方向切换时未闭合的行先补 ⏎ 强制断行,
                 // 保证每个物理行只含一个方向且行首必有前缀(不变式见文件 banner 图例)
+                // 中文兼容: GBK 设备输出先增量转码为 UTF-8(0x0A 不出现在多字节字符内, 分行逻辑不受影响)
+                let data = decodeGBK ? self.decodeTextChunk(data, direction: direction) : data
+                guard !data.isEmpty else { return }   // 半字全部进暂存时本块无输出
                 if timestamps {
                     let prefix = Data("[\(Self.lineStampFormatter.string(from: Date()))] [\(direction.rawValue)] ".utf8)
                     var rest = data[...]
@@ -289,6 +298,60 @@ public final class SessionLogger: ObservableObject {
                 // 磁盘写失败时静默丢弃, 避免影响数据通路
             }
         }
+    }
+
+    // MARK: - 中文兼容(GBK → UTF-8 增量转码)
+
+    /// GB18030(GBK 超集): 华为/H3C 等国产设备控制台常用编码
+    static let gbkEncoding = String.Encoding(rawValue:
+        CFStringConvertEncodingToNSStringEncoding(CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)))
+
+    /// 每个方向的半字暂存(跨 BLE 包的不完整 UTF-8 序列 / GBK 孤立前导字节, 至多 3 字节)
+    private var textCarry: [LogDirection: [UInt8]] = [:]
+
+    /// 在 queue 上调用: 把一块串口字节流转码为 UTF-8
+    /// 判定: 严格 UTF-8 优先(现代 UTF-8 设备原样通过); 失败按 GBK 解码; 再失败宽松解码(非法字节 → U+FFFD)。
+    /// 已知取舍: 与 UTF-8 双字节序列同形的 GBK 字(如「猫」= C3 A8 = UTF-8 è)按 UTF-8 处理。
+    private func decodeTextChunk(_ data: Data, direction: LogDirection) -> Data {
+        var buf = Data()
+        if let carry = textCarry[direction], !carry.isEmpty {
+            buf.append(contentsOf: carry)
+            textCarry[direction] = nil
+        }
+        buf.append(data)
+        guard buf.contains(where: { $0 >= 0x80 }) else { return buf }   // 纯 ASCII 直通
+
+        // 1) 严格 UTF-8(整块)
+        if let str = String(bytes: buf, encoding: .utf8) { return Data(str.utf8) }
+
+        // 2) 结尾是不完整 UTF-8 序列(前导字节 + 至多 3 个 continuation, 或孤立前导):
+        //    暂存尾巴等下一块拼接, 头部若能严格解码则按 UTF-8 输出
+        var cont = 0
+        var idx = buf.count
+        while idx > 0, cont < 3, (buf[idx - 1] & 0xC0) == 0x80 { cont += 1; idx -= 1 }
+        var tailStart: Int?      // 不完整序列的起点
+        if cont == 0, let last = buf.last, last >= 0xC2, last <= 0xF4 {
+            tailStart = buf.count - 1                            // 孤立前导(序列刚开始)
+        } else if idx > 0 {
+            let lead = buf[idx - 1]
+            let expect = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC2 ? 2 : 0
+            if expect > cont + 1 { tailStart = idx - 1 }         // continuation 不够, 序列未完整
+        }
+        if let split = tailStart, let str = String(bytes: buf[..<split], encoding: .utf8) {
+            textCarry[direction] = Array(buf[split...])
+            return Data(str.utf8)
+        }
+
+        // 3) GBK: 整块解码; 失败且末尾是孤立前导字节则暂存半字再试
+        if let str = String(bytes: buf, encoding: Self.gbkEncoding) { return Data(str.utf8) }
+        if let last = buf.last, (0x81...0xFE).contains(last),
+           let str = String(bytes: buf.dropLast(), encoding: Self.gbkEncoding) {
+            textCarry[direction] = [last]
+            return Data(str.utf8)
+        }
+
+        // 4) 兜底: 宽松 UTF-8(非法字节段 → U+FFFD)
+        return Data(String(decoding: buf, as: UTF8.self).utf8)
     }
 
     // MARK: - 文件名模板

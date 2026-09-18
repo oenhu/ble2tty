@@ -158,7 +158,8 @@ public final class BridgeModel: ObservableObject {
             if self.settings.logEnabled {
                 self.logger.log(data, direction: .rx,
                                 format: self.settings.logFormat,
-                                timestamps: self.settings.logTimestamps)
+                                timestamps: self.settings.logTimestamps,
+                                decodeGBK: self.settings.logGBKCompatible)
             }
             self.appendStreamChunk(data, kind: .rx)
             self.onRawRX?(data)
@@ -225,7 +226,8 @@ public final class BridgeModel: ObservableObject {
                 if self.settings.logEnabled, self.settings.logSentData {
                     self.logger.log(data, direction: .tx,
                                     format: self.settings.logFormat,
-                                    timestamps: self.settings.logTimestamps)
+                                    timestamps: self.settings.logTimestamps,
+                                    decodeGBK: self.settings.logGBKCompatible)
                 }
                 self.appendStreamChunk(data, kind: .tx)
             }
@@ -317,9 +319,14 @@ public final class BridgeModel: ObservableObject {
             return
         }
         guard logger.currentFileURL == nil else { return }
+        // banner 中如实标注转码(文件字节与线上原始字节不一致的唯一情况)
+        var header = "虚拟串口: \(port.linkPath.isEmpty ? "未创建" : port.linkPath)"
+        if settings.logGBKCompatible, settings.logFormat == .ascii {
+            header += "\n编码: 中文兼容已启用, GBK 内容已转码为 UTF-8"
+        }
         logger.openSession(directory: settings.logDirectory,
                            deviceName: ble.connectedDeviceName,
-                           header: "虚拟串口: \(port.linkPath.isEmpty ? "未创建" : port.linkPath)",
+                           header: header,
                            mode: settings.logStorageMode,
                            template: settings.logNameTemplate,
                            customName: settings.logCustomName)
@@ -340,7 +347,8 @@ public final class BridgeModel: ObservableObject {
         addBytes(tx: UInt64(data.count))
         ble.send(data)
         if settings.logEnabled, settings.logSentData {
-            logger.log(data, direction: .tx, format: settings.logFormat, timestamps: settings.logTimestamps)
+            logger.log(data, direction: .tx, format: settings.logFormat, timestamps: settings.logTimestamps,
+                       decodeGBK: settings.logGBKCompatible)
         }
         flushPendings()
         appendLine(TerminalLine(kind: .tx, data: data))
@@ -352,7 +360,8 @@ public final class BridgeModel: ObservableObject {
         addBytes(tx: UInt64(data.count))
         ble.send(data)
         if settings.logEnabled, settings.logSentData {
-            logger.log(data, direction: .tx, format: settings.logFormat, timestamps: settings.logTimestamps)
+            logger.log(data, direction: .tx, format: settings.logFormat, timestamps: settings.logTimestamps,
+                       decodeGBK: settings.logGBKCompatible)
         }
     }
 

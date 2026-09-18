@@ -98,6 +98,9 @@ private struct LoggingSettingsTab: View {
                     .disabled(!settings.logEnabled)
                 Toggle("每行附加时间戳与方向", isOn: $settings.logTimestamps)
                     .disabled(!settings.logEnabled)
+                Toggle("中文兼容(GBK 设备输出自动转 UTF-8)", isOn: $settings.logGBKCompatible)
+                    .disabled(!settings.logEnabled)
+                    .help("华为/H3C 等国产设备控制台用 GBK 编码输出中文, 原样保存在 UTF-8 编辑器中是乱码; 开启后纯文本日志自动转码。仅对「纯文本」格式生效, HEX 类格式始终保留原始字节。")
                 Picker("日志格式", selection: $settings.logFormat) {
                     ForEach(LogFormat.allCases) { Text($0.rawValue).tag($0) }
                 }

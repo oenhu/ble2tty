@@ -403,6 +403,49 @@ do {
     check(waitMain { cb4 } && gotNil, "无会话切割回调 nil")
 }
 
+print("== 日志 GBK 转码 ==")
+do {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("CH9140SelfTest-\(UUID().uuidString)")
+    // "宿州本部" 的 GBK 编码(真实设备主机名样本: 宿州本部1-10.34.240.11>)
+    let gbk: [UInt8] = [0xCB, 0xDE, 0xD6, 0xDD, 0xB1, 0xBE, 0xB2, 0xBF]
+
+    let logger = SessionLogger()
+    logger.openSession(directory: dir, deviceName: "T", header: "GBK 测试",
+                       mode: .perSession, template: "gbk_compat")
+    // 第一块以半个汉字(州的前导 0xD6)结尾, 验证跨包拼接
+    logger.log(Data(gbk[0..<3]), direction: .rx, format: .ascii, timestamps: false, decodeGBK: true)
+    logger.log(Data(gbk[3...]), direction: .rx, format: .ascii, timestamps: false, decodeGBK: true)
+    logger.log(Data(">\r\n".utf8), direction: .rx, format: .ascii, timestamps: false, decodeGBK: true)
+    // UTF-8 设备内容须原样通过(「你好」E4BD A0 / E5A5 BD)
+    logger.log(Data("你好".utf8), direction: .rx, format: .ascii, timestamps: false, decodeGBK: true)
+    // UTF-8 半个字符跨包: 「好」= E5 A5 BD, 拆成 E5 | A5 BD
+    logger.log(Data([0xE5]), direction: .tx, format: .ascii, timestamps: false, decodeGBK: true)
+    logger.log(Data([0xA5, 0xBD]), direction: .tx, format: .ascii, timestamps: false, decodeGBK: true)
+    logger.log(Data("\r\n".utf8), direction: .tx, format: .ascii, timestamps: false, decodeGBK: true)
+    logger.closeSession()
+    Thread.sleep(forTimeInterval: 0.5)
+
+    let content = try? String(contentsOf: dir.appendingPathComponent("gbk_compat.log"), encoding: .utf8)
+    check(content?.contains("宿州本部>") == true, "GBK 主机名转 UTF-8", content ?? "nil")
+    check(content?.contains("你好") == true, "UTF-8 内容原样保留", content ?? "nil")
+    check(content?.contains("好") == true, "UTF-8 半字跨包拼接", content ?? "nil")
+
+    // 关闭转码: GBK 原始字节逐字节保留
+    let logger2 = SessionLogger()
+    logger2.openSession(directory: dir, deviceName: "T", header: "raw",
+                        mode: .perSession, template: "gbk_raw")
+    logger2.log(Data(gbk), direction: .rx, format: .ascii, timestamps: false, decodeGBK: false)
+    logger2.closeSession()
+    Thread.sleep(forTimeInterval: 0.4)
+    if let raw = try? Data(contentsOf: dir.appendingPathComponent("gbk_raw.log")) {
+        check(raw.contains(Data(gbk)), "关闭转码时 GBK 原始字节保留")
+    } else {
+        check(false, "关闭转码时 GBK 原始字节保留", "文件读取失败")
+    }
+    try? FileManager.default.removeItem(at: dir)
+}
+
 print("== LineAssembler 行装配 ==")
 do {
     func B(_ s: String) -> Data { Data(s.utf8) }

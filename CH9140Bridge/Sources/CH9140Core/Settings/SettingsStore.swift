@@ -91,6 +91,10 @@ public final class SettingsStore: ObservableObject {
     @Published public var logSentData: Bool {
         didSet { defaults.set(logSentData, forKey: key("logSentData")) }
     }
+    /// 纯文本日志中文兼容: GBK 设备输出自动转码为 UTF-8(HEX 类格式不受影响, 始终保留原始字节)
+    @Published public var logGBKCompatible: Bool {
+        didSet { defaults.set(logGBKCompatible, forKey: key("logGBKCompatible")) }
+    }
 
     public var logDirectory: URL {
         URL(fileURLWithPath: (logDirectoryPath as NSString).expandingTildeInPath)
@@ -195,6 +199,7 @@ public final class SettingsStore: ObservableObject {
         logRotateShortcutEnabled = bool("logRotateShortcutEnabled", false)
         logTimestamps    = bool("logTimestamps", true)
         logSentData      = bool("logSentData", true)
+        logGBKCompatible = bool("logGBKCompatible", true)
 
         portName       = d.string(forKey: "CH9140Bridge.portName") ?? "CH9140"
         autoCreatePort = bool("autoCreatePort", true)
