@@ -11,8 +11,6 @@ struct DeviceListView: View {
     @EnvironmentObject var model: BridgeModel
     @EnvironmentObject var ble: BLEManager
     @EnvironmentObject var settings: SettingsStore
-    @EnvironmentObject var port: VirtualSerialPort
-    @EnvironmentObject var logger: SessionLogger
 
     var body: some View {
         VStack(spacing: 0) {
@@ -56,66 +54,20 @@ struct DeviceListView: View {
 
             Divider()
 
-            // 设备列表 + 最近连接
-            if ble.devices.isEmpty && settings.recentDevices.isEmpty {
-                Spacer()
-                VStack(spacing: 10) {
-                    if ble.isScanning {
-                        ProgressView()
-                            .controlSize(.large)
-                    } else {
-                        Image(systemName: "dot.radiowaves.left.and.right")
-                            .font(.system(size: 30))
-                            .foregroundStyle(.tertiary)
-                    }
-                    Text(ble.isScanning ? "正在搜索 CH9140 设备…" : "未发现设备\n点击上方按钮开始扫描")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                    if !ble.isScanning {
-                        Text("双击列表项快速连接")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                Spacer()
-            } else {
-                List {
-                    if !ble.devices.isEmpty {
-                        Section("发现的设备") {
-                            ForEach(ble.devices) { device in
-                                DeviceRow(device: device)
-                            }
-                        }
-                    }
-                    if !settings.recentDevices.isEmpty {
-                        Section("最近连接") {
-                            ForEach(settings.recentDevices) { recent in
-                                RecentDeviceRow(recent: recent)
-                            }
-                            .onDelete { indexSet in
-                                for i in indexSet {
-                                    settings.removeRecentDevice(settings.recentDevices[i].uuid)
-                                }
-                            }
-                        }
-                    }
-                }
-                .listStyle(.sidebar)
-            }
+            // 设备列表: 占据剩余空间, 随窗口自动调整
+            deviceListArea
+                .frame(minHeight: 100, maxHeight: .infinity)
 
             Divider()
 
-            // 面板区(原中间栏): MODEM 与流控 / 虚拟串口 / 会话日志
-            ScrollView {
-                VStack(spacing: 12) {
-                    ModemSectionView()
-                    VirtualPortSectionView()
-                    LoggingSectionView()
-                }
-                .padding(10)
+            // 面板区: 虚拟串口 / 会话日志 —— 固定取内容理想高度, 完整显示
+            // 不用 ScrollView(高度足够时滚动条仍会占位/闪现); 窗口变矮时优先压缩上方列表
+            VStack(spacing: 12) {
+                VirtualPortSectionView()
+                LoggingSectionView()
             }
-            .frame(minHeight: 160)
+            .padding(10)
+            .layoutPriority(1)
 
             Divider()
 
@@ -134,6 +86,57 @@ struct DeviceListView: View {
                 }
             }
             .padding(10)
+        }
+    }
+
+    /// 设备列表 + 最近连接(空态给占位提示)
+    @ViewBuilder
+    private var deviceListArea: some View {
+        if ble.devices.isEmpty && settings.recentDevices.isEmpty {
+            Spacer()
+            VStack(spacing: 10) {
+                if ble.isScanning {
+                    ProgressView()
+                        .controlSize(.large)
+                } else {
+                    Image(systemName: "dot.radiowaves.left.and.right")
+                        .font(.system(size: 30))
+                        .foregroundStyle(.tertiary)
+                }
+                Text(ble.isScanning ? "正在搜索 CH9140 设备…" : "未发现设备\n点击上方按钮开始扫描")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                if !ble.isScanning {
+                    Text("双击列表项快速连接")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            Spacer()
+        } else {
+            List {
+                if !ble.devices.isEmpty {
+                    Section("发现的设备") {
+                        ForEach(ble.devices) { device in
+                            DeviceRow(device: device)
+                        }
+                    }
+                }
+                if !settings.recentDevices.isEmpty {
+                    Section("最近连接") {
+                        ForEach(settings.recentDevices) { recent in
+                            RecentDeviceRow(recent: recent)
+                        }
+                        .onDelete { indexSet in
+                            for i in indexSet {
+                                settings.removeRecentDevice(settings.recentDevices[i].uuid)
+                            }
+                        }
+                    }
+                }
+            }
+            .listStyle(.sidebar)
         }
     }
 

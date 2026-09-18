@@ -27,6 +27,8 @@ struct SettingsView: View {
 
 private struct GeneralSettingsTab: View {
     @EnvironmentObject var settings: SettingsStore
+    @EnvironmentObject var model: BridgeModel
+    @EnvironmentObject var ble: BLEManager
     /// 终端毛玻璃(SwiftTermView 读同一键, 无需经 SettingsStore 中转)
     @AppStorage("CH9140Bridge.terminalFrostedGlass") private var terminalFrostedGlass = false
 
@@ -68,6 +70,33 @@ private struct GeneralSettingsTab: View {
             }
 
             Section {
+                // 状态指示灯 + 应用按钮
+                HStack(spacing: 14) {
+                    modemLED("CTS", on: ble.modemStatus.cts, tip: "清除发送(芯片输入)")
+                    modemLED("DSR", on: ble.modemStatus.dsr, tip: "数据设备就绪(芯片输入)")
+                    modemLED("RI",  on: ble.modemStatus.ri,  tip: "振铃指示(芯片输入)")
+                    modemLED("DCD", on: ble.modemStatus.dcd, tip: "载波检测(芯片输入)")
+                    Spacer()
+                    if ble.chipBufferFull {
+                        Text("缓冲满")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .help("芯片串口发送缓冲区已满(0x88 上报), 发送已暂停")
+                    }
+                    Button("应用") { model.applyModemLines() }
+                        .controlSize(.small)
+                        .disabled(!ble.isReady)
+                        .help("通过 0xFFF3 配置通道下发流控与 MODEM 输出(指令 0x07)")
+                }
+                Toggle("硬件流控(CTS/RTS)", isOn: $model.editFlowControl)
+                    .help("CTS/RTS 硬件流控(指令 0x07)")
+                Toggle("DTR 输出电平", isOn: bitBinding(\.editDTR))
+                Toggle("RTS 输出电平", isOn: bitBinding(\.editRTS))
+            } header: {
+                Text("MODEM 与流控").font(.headline)
+            }
+
+            Section {
                 Toggle("终端毛玻璃效果", isOn: $terminalFrostedGlass)
                 Text("「终端」页背景变为半透明模糊并压暗以保证可读性; 仅影响终端仿真模式, 监视模式不受影响。")
                     .font(.caption)
@@ -82,6 +111,26 @@ private struct GeneralSettingsTab: View {
         }
         .formStyle(.grouped)
         .padding()
+    }
+}
+
+// MARK: - MODEM 辅助
+
+private extension GeneralSettingsTab {
+    func bitBinding(_ keyPath: ReferenceWritableKeyPath<BridgeModel, UInt8>) -> Binding<Bool> {
+        Binding(get: { model[keyPath: keyPath] == 1 },
+                set: { model[keyPath: keyPath] = $0 ? 1 : 0 })
+    }
+
+    func modemLED(_ name: String, on: Bool, tip: String) -> some View {
+        VStack(spacing: 3) {
+            Circle()
+                .fill(on ? Color.green : Color.gray.opacity(0.3))
+                .frame(width: 11, height: 11)
+                .shadow(color: on ? .green.opacity(0.6) : .clear, radius: 3)
+            Text(name).font(.caption2).foregroundStyle(.secondary)
+        }
+        .help(tip)
     }
 }
 

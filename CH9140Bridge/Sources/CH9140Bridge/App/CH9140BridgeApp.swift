@@ -17,7 +17,7 @@ struct CH9140BridgeApp: App {
                 .environmentObject(model.port)
                 .environmentObject(model.logger)
                 .environmentObject(model.settings)
-                .frame(minWidth: 980, minHeight: 640)
+                .frame(minWidth: 1100, minHeight: 700)
                 .onAppear { model.startup() }
         }
         .defaultSize(width: 1180, height: 780)
@@ -43,6 +43,8 @@ struct CH9140BridgeApp: App {
         Settings {
             SettingsView()
                 .environmentObject(model.settings)
+                .environmentObject(model)
+                .environmentObject(model.ble)
         }
     }
 }
