@@ -11,6 +11,9 @@ public struct RecentDevice: Codable, Equatable, Identifiable, Sendable {
     public let uuid: UUID
     public var name: String
     public var lastUsed: Date
+    /// 设备真实 MAC(XX-XX-XX-XX-XX-XX), 连接就绪时从系统解析并缓存;
+    /// 旧持久化记录无此字段, 解码为 nil(可选属性自动兼容缺失键)
+    public var macAddress: String?
     public var id: UUID { uuid }
 }
 
@@ -128,10 +131,19 @@ public final class SettingsStore: ObservableObject {
         didSet { persistRecentDevices() }
     }
 
-    public func addRecentDevice(uuid: UUID, name: String) {
+    public func addRecentDevice(uuid: UUID, name: String, macAddress: String? = nil) {
         var list = recentDevices.filter { $0.uuid != uuid }
-        list.insert(RecentDevice(uuid: uuid, name: name, lastUsed: Date()), at: 0)
+        // 本次未解析到 MAC 时保留历史缓存(同名芯片仍可区分)
+        let mac = macAddress ?? recentDevices.first { $0.uuid == uuid }?.macAddress
+        list.insert(RecentDevice(uuid: uuid, name: name, lastUsed: Date(), macAddress: mac), at: 0)
         recentDevices = Array(list.prefix(5))
+    }
+
+    /// 连接就绪后异步解析到 MAC 时回填(不改变排序与时间)
+    public func updateRecentDeviceMAC(_ uuid: UUID, mac: String) {
+        guard let i = recentDevices.firstIndex(where: { $0.uuid == uuid }),
+              recentDevices[i].macAddress != mac else { return }
+        recentDevices[i].macAddress = mac
     }
 
     public func removeRecentDevice(_ uuid: UUID) {

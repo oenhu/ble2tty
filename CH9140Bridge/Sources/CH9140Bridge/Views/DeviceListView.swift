@@ -138,7 +138,13 @@ struct DeviceListView: View {
 private struct DeviceRow: View {
     @EnvironmentObject var model: BridgeModel
     @EnvironmentObject var ble: BLEManager
+    @EnvironmentObject var settings: SettingsStore
     let device: DiscoveredDevice
+
+    /// 历史连接缓存的真实 MAC(扫描时系统不提供 MAC, 仅能显示曾连接过的设备)
+    private var cachedMAC: String? {
+        settings.recentDevices.first { $0.uuid == device.id }?.macAddress
+    }
 
     private var isConnected: Bool {
         ble.connectedUUID == device.id && ble.connectionState != .disconnected
@@ -156,9 +162,13 @@ private struct DeviceRow: View {
                 Text(device.name)
                     .font(.body.weight(isConnected ? .semibold : .regular))
                     .lineLimit(1)
-                Text("\(device.rssi) dBm · \(device.id.uuidString.prefix(8))")
-                    .font(.caption2)
+                Text("\(device.rssi) dBm · \(cachedMAC ?? String(device.id.uuidString.prefix(8)))")
+                    .font(.system(.caption2, design: .monospaced))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .help(cachedMAC != nil
+                          ? "设备 MAC(来自历史连接缓存)"
+                          : "CoreBluetooth 标识前 8 位(连接成功后自动识别真实 MAC)")
             }
             Spacer()
             if isConnecting {
@@ -232,6 +242,15 @@ private struct RecentDeviceRow: View {
         return f
     }()
 
+    /// 副标题: MAC 优先(CH9140 出厂同名, MAC 是区分不同芯片的唯一稳定标识),
+    /// 未识别到 MAC 的旧记录回退显示 UUID 前 8 位
+    private var recentSubtitle: String {
+        let identity = recent.macAddress
+            ?? String(recent.uuid.uuidString.prefix(8)).uppercased()
+        let time = Self.relativeFormatter.localizedString(for: recent.lastUsed, relativeTo: Date())
+        return "\(identity) · \(time)"
+    }
+
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: "clock.arrow.circlepath")
@@ -241,9 +260,13 @@ private struct RecentDeviceRow: View {
                 Text(recent.name)
                     .font(.callout)
                     .lineLimit(1)
-                Text(Self.relativeFormatter.localizedString(for: recent.lastUsed, relativeTo: Date()))
-                    .font(.caption2)
+                Text(recentSubtitle)
+                    .font(.system(.caption2, design: .monospaced))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .help(recent.macAddress != nil
+                          ? "设备 MAC(连接时自动识别, 用于区分同名芯片)"
+                          : "尚未识别到 MAC(该设备连接成功后自动补充)")
             }
             Spacer()
             if isCurrent {

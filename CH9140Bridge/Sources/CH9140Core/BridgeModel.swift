@@ -174,7 +174,14 @@ public final class BridgeModel: ObservableObject {
             case .ready:
                 self.resetByteCounters()
                 if let uuid = self.ble.connectedUUID {
-                    self.settings.addRecentDevice(uuid: uuid, name: self.ble.connectedDeviceName)
+                    let name = self.ble.connectedDeviceName
+                    self.settings.addRecentDevice(uuid: uuid, name: name)
+                    // CoreBluetooth 不给 MAC: 后台查一次系统蓝牙报告, 回填"最近连接"
+                    DeviceMACResolver.connectedDeviceMAC(name: name) { [weak self] mac in
+                        guard let self, let mac else { return }
+                        self.settings.updateRecentDeviceMAC(uuid, mac: mac)
+                        self.appendSystem("设备 MAC: \(mac)")
+                    }
                 }
                 // 连接就绪: 下发默认参数, 开启日志会话
                 if self.settings.logEnabled {

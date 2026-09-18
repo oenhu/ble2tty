@@ -491,6 +491,36 @@ do {
     check(SettingsStore(defaults: d).recentDevices.count == 1, "最近连接删除并持久化")
     s4.removeRecentDevice(UUID(uuidString: "8BE7B8EA-0000-0000-0000-000000000002")!)
 
+    // 最近连接的 MAC: 回填 / 持久化 / 重连保留
+    let macUUID = UUID(uuidString: "8BE7B8EA-0000-0000-0000-000000000003")!
+    s4.addRecentDevice(uuid: macUUID, name: "CH9140BLE2U")
+    check(s4.recentDevices.first { $0.uuid == macUUID }?.macAddress == nil, "新记录初始无 MAC")
+    s4.updateRecentDeviceMAC(macUUID, mac: "DC-04-5A-5E-12-5B")
+    check(s4.recentDevices.first { $0.uuid == macUUID }?.macAddress == "DC-04-5A-5E-12-5B", "MAC 回填")
+    check(SettingsStore(defaults: d).recentDevices.first { $0.uuid == macUUID }?.macAddress == "DC-04-5A-5E-12-5B",
+          "MAC 随最近连接持久化")
+    s4.updateRecentDeviceMAC(macUUID, mac: "DC-04-5A-5E-12-5B")
+    check(s4.recentDevices.first { $0.uuid == macUUID }?.macAddress == "DC-04-5A-5E-12-5B"
+          && s4.recentDevices[0].uuid == macUUID, "MAC 重复回填幂等不改排序")
+    // 重连未解析到 MAC(传 nil)时保留历史缓存
+    s4.addRecentDevice(uuid: macUUID, name: "CH9140BLE2U")
+    check(s4.recentDevices[0].uuid == macUUID && s4.recentDevices[0].macAddress == "DC-04-5A-5E-12-5B",
+          "重连未解析到 MAC 时保留历史缓存")
+    // 旧持久化格式(无 macAddress 字段)可正常解码
+    let legacy = #"[{"uuid":"8BE7B8EA-0000-0000-0000-000000000009","name":"OldDev","lastUsed":700000000}]"#
+    d.set(legacy.data(using: .utf8)!, forKey: "CH9140Bridge.recentDevices")
+    let s6 = SettingsStore(defaults: d)
+    check(s6.recentDevices.count == 1 && s6.recentDevices[0].name == "OldDev" && s6.recentDevices[0].macAddress == nil,
+          "旧持久化格式兼容(缺失 MAC 字段解码为 nil)")
+
+    // MAC 归一化: 每两位用 - 分割, 大写
+    check(DeviceMACResolver.formatMAC("DC:04:5A:5E:12:5B") == "DC-04-5A-5E-12-5B", "冒号 MAC 转横线大写")
+    check(DeviceMACResolver.formatMAC("dc-04-5a-5e-12-5b") == "DC-04-5A-5E-12-5B", "横线小写归一")
+    check(DeviceMACResolver.formatMAC("dc045a5e125b") == "DC-04-5A-5E-12-5B", "无分隔符补全")
+    check(DeviceMACResolver.formatMAC("DC:04:5A") == nil, "位数不足拒绝")
+    check(DeviceMACResolver.formatMAC("DC:04:5A:5E:12:5B!") == nil, "含杂字符拒绝")
+    check(DeviceMACResolver.formatMAC("DC:04:5A:5E:12:ZZ") == nil, "非十六进制拒绝")
+
     // 整域清理
     UserDefaults().removePersistentDomain(forName: suiteName)
 }

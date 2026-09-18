@@ -77,6 +77,10 @@ enum CLIRunner {
         ble.onConnectionChange = { st in
             switch st {
             case .ready:
+                // 连接就绪: 顺带解析设备真实 MAC(CoreBluetooth 不提供)
+                DeviceMACResolver.connectedDeviceMAC(name: ble.connectedDeviceName) { mac in
+                    if let mac { say("[BLE] 设备 MAC: \(mac)") }
+                }
                 // 连接就绪: 先下发目标串口参数, 再创建虚拟串口
                 let p = SerialParameters(baudRate: baud, dataBits: 8, stopBits: 1, parity: 0)
                 ble.applySerialParameters(p) { ok, info in

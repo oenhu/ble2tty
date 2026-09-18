@@ -141,7 +141,14 @@ struct StatusBarView: View {
 
     private var connectionText: String {
         switch ble.connectionState {
-        case .ready: return ble.connectedDeviceName
+        case .ready:
+            let name = ble.connectedDeviceName
+            // 已连接设备附上真实 MAC(来自连接就绪时的系统解析缓存)
+            if let uuid = ble.connectedUUID,
+               let mac = settings.recentDevices.first(where: { $0.uuid == uuid })?.macAddress {
+                return "\(name) · \(mac)"
+            }
+            return name
         case .connecting: return "连接中…"
         case .discovering: return "发现服务中…"
         case .failed: return "连接失败"
