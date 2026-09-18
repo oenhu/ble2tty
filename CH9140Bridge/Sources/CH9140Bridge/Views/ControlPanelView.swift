@@ -22,7 +22,7 @@ struct ControlPanelView: View {
         ("{date}",     "日期, 如 2026-09-05"),
         ("{time}",     "时间, 如 184430"),
         ("{datetime}", "日期时间, 如 20260905_184430"),
-        ("{seq}",      "当日切割序号, 如 01、02(切割时自动递增)"),
+        ("{seq}",      "当日切割序号, 如 1、2(切割时自动递增)"),
     ]
 
     static let baudRates: [UInt32] = [
@@ -275,7 +275,7 @@ struct ControlPanelView: View {
                         .textSelection(.enabled)
                         .help(url.path)
                 } else {
-                    Text(settings.logEnabled ? "连接设备后自动创建日志文件" : "可在 设置 > 日志 中开启")
+                    Text(logIdleHint)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -331,7 +331,12 @@ struct ControlPanelView: View {
                         NSWorkspace.shared.open(dir)
                     }
                     if logger.currentFileURL != nil {
-                        Button("结束日志") { logger.closeSession() }
+                        Button("结束日志") { model.stopLog() }
+                            .help("收尾并关闭当前日志文件; 连接保持, 数据停止写盘")
+                    } else {
+                        Button("开始日志") { model.startLog() }
+                            .disabled(!settings.logEnabled || !ble.isReady)
+                            .help(startLogHelp)
                     }
                 }
                 .buttonStyle(.bordered)
@@ -341,5 +346,19 @@ struct ControlPanelView: View {
         } label: {
             Label("会话日志", systemImage: "doc.text")
         }
+    }
+
+    /// 无日志文件时的提示文案(区分未开启/未连接/已手动结束)
+    private var logIdleHint: String {
+        if !settings.logEnabled { return "可在 设置 > 日志 中开启" }
+        if !ble.isReady { return "连接设备后自动创建日志文件" }
+        return "日志已结束, 点击下方「开始日志」恢复记录"
+    }
+
+    /// 「开始日志」按钮的提示(含不可用原因)
+    private var startLogHelp: String {
+        if !settings.logEnabled { return "需先在 设置 > 日志 中开启「默认保存日志」" }
+        if !ble.isReady { return "连接设备后才能开始记录" }
+        return "按当前模板开启新日志文件, 恢复记录(重名自动避让)"
     }
 }

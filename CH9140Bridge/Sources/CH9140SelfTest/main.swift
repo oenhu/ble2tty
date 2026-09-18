@@ -317,7 +317,7 @@ do {
           "自定义标识+日期", resolve("{name}_{date}", "dev", "机房A-SW01"))
     check(resolve("CH9140_{name}_{device}") == "CH9140_CH9140BLE2U",
           "空标识折叠分隔符", resolve("CH9140_{name}_{device}"))
-    check(resolve("{device}_{seq}", "dev", "", 3) == "dev_03", "序号两位", resolve("{device}_{seq}", "dev", "", 3))
+    check(resolve("{device}_{seq}", "dev", "", 3) == "dev_3", "序号不补零", resolve("{device}_{seq}", "dev", "", 3))
     check(resolve("a/b\\c:d") == "a-b-c-d", "非法字符净化", resolve("a/b\\c:d"))
     check(resolve("") == "CH9140", "空模板回退默认")
     check(resolve("x_{datetime}", "d", "", 1, degrade: true) == "x_2026-09-05",
@@ -331,7 +331,7 @@ do {
         .appendingPathComponent("CH9140SelfTest-\(UUID().uuidString)")
     let day = SessionLogger.dayFormatter.string(from: Date())
 
-    // 固定模板切割: 重名自动补 -02 序号
+    // 固定模板切割: 重名自动补 -2 序号
     let logger = SessionLogger()
     logger.openSession(directory: dir, deviceName: "T", header: "切割测试",
                        mode: .perSession, template: "rotate_fixed")
@@ -347,11 +347,11 @@ do {
     Thread.sleep(forTimeInterval: 0.4)
 
     let files = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
-    check(files.contains("rotate_fixed.log") && files.contains("rotate_fixed-02.log"),
+    check(files.contains("rotate_fixed.log") && files.contains("rotate_fixed-2.log"),
           "固定模板切割生成序号文件", files.joined())
-    check(newURL?.lastPathComponent == "rotate_fixed-02.log", "切割回调返回新文件", newURL?.lastPathComponent ?? "nil")
+    check(newURL?.lastPathComponent == "rotate_fixed-2.log", "切割回调返回新文件", newURL?.lastPathComponent ?? "nil")
     if let c1 = try? String(contentsOf: dir.appendingPathComponent("rotate_fixed.log"), encoding: .utf8),
-       let c2 = try? String(contentsOf: dir.appendingPathComponent("rotate_fixed-02.log"), encoding: .utf8) {
+       let c2 = try? String(contentsOf: dir.appendingPathComponent("rotate_fixed-2.log"), encoding: .utf8) {
         check(c1.contains("part1") && !c1.contains("part2") && c2.contains("part2") && !c2.contains("part1"),
               "切割前后数据各归其档")
         check(c2.contains("手动切割"), "新文件含切割标记")
@@ -369,7 +369,7 @@ do {
     logger2.closeSession()
     Thread.sleep(forTimeInterval: 0.4)
     let files2 = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
-    check(files2.contains("rot_01.log") && files2.contains("rot_02.log"),
+    check(files2.contains("rot_1.log") && files2.contains("rot_2.log"),
           "{seq} 模板序号递增", files2.joined())
     try? FileManager.default.removeItem(at: dir)
 

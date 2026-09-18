@@ -136,7 +136,7 @@ public final class SessionLogger: ObservableObject {
         var url = folder.appendingPathComponent(name + ".log")
 
         // 非追加模式下保证不覆盖已有文件:
-        // 模板含 {seq} 则递增序号, 否则从 -02 起追加序号后缀
+        // 模板含 {seq} 则递增序号, 否则从 -2 起追加序号后缀
         if mode != .dailyFile {
             if template.contains("{seq}") {
                 var n = seq
@@ -154,7 +154,7 @@ public final class SessionLogger: ObservableObject {
                     name = Self.resolveTemplate(template, deviceName: deviceName ?? "CH9140",
                                                 customName: customName, date: now,
                                                 seq: seq, degradeTime: degradeTime)
-                       + String(format: "-%02d", suffix)
+                       + "-\(suffix)"
                     url = folder.appendingPathComponent(name + ".log")
                     suffix += 1
                 }
@@ -301,7 +301,7 @@ public final class SessionLogger: ObservableObject {
 
     /// 解析文件名模板
     /// 支持变量: {device} 设备名, {name} 自定义标识, {date} 日期, {time} 时间,
-    ///           {datetime} 日期时间, {seq} 当日切割序号(两位)
+    ///           {datetime} 日期时间, {seq} 当日切割序号
     /// - Parameter degradeTime: 按日期合并模式下 {datetime}/{time} 退化为 {date}/空
     public static func resolveTemplate(_ template: String, deviceName: String,
                                        customName: String, date: Date,
@@ -318,7 +318,7 @@ public final class SessionLogger: ObservableObject {
             t = t.replacingOccurrences(of: "{datetime}", with: fileStampFormatter.string(from: date))
             t = t.replacingOccurrences(of: "{time}", with: timeStampFormatter.string(from: date))
         }
-        t = t.replacingOccurrences(of: "{seq}", with: String(format: "%02d", seq))
+        t = t.replacingOccurrences(of: "{seq}", with: String(seq))
         // 非法文件名字符 -> -
         t = t.replacingOccurrences(of: #"[/:*?"<>|\\]"#, with: "-", options: .regularExpression)
         // 折叠连续分隔符(变量为空时避免 "a__b" / "a-_-b")

@@ -185,12 +185,7 @@ public final class BridgeModel: ObservableObject {
                 }
                 // 连接就绪: 下发默认参数, 开启日志会话
                 if self.settings.logEnabled {
-                    self.logger.openSession(directory: self.settings.logDirectory,
-                                            deviceName: self.ble.connectedDeviceName,
-                                            header: "虚拟串口: \(self.port.linkPath.isEmpty ? "未创建" : self.port.linkPath)",
-                                            mode: self.settings.logStorageMode,
-                                            template: self.settings.logNameTemplate,
-                                            customName: self.settings.logCustomName)
+                    self.startLog()
                 }
                 if self.settings.applyDefaultsOnConnect {
                     self.applySerialParameters()
@@ -313,6 +308,29 @@ public final class BridgeModel: ObservableObject {
                 self.appendSystem("当前没有进行中的日志会话(需先连接设备并开启日志)")
             }
         }
+    }
+
+    /// 手动开启日志会话(「结束日志」后恢复记录; 重名按规则自动避让, 不覆盖旧文件)
+    public func startLog() {
+        guard ble.isReady else {
+            appendSystem("未连接设备, 无法开始日志")
+            return
+        }
+        guard logger.currentFileURL == nil else { return }
+        logger.openSession(directory: settings.logDirectory,
+                           deviceName: ble.connectedDeviceName,
+                           header: "虚拟串口: \(port.linkPath.isEmpty ? "未创建" : port.linkPath)",
+                           mode: settings.logStorageMode,
+                           template: settings.logNameTemplate,
+                           customName: settings.logCustomName)
+        appendSystem("已开启新的日志会话")
+    }
+
+    /// 手动结束日志会话(连接保持, 数据停止写盘; 重连或「开始日志」可恢复)
+    public func stopLog() {
+        guard logger.currentFileURL != nil else { return }
+        logger.closeSession()
+        appendSystem("日志会话已结束, 可在日志面板点击「开始日志」恢复记录")
     }
 
     // MARK: - 终端直接发送(内置控制台)
