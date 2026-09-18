@@ -91,9 +91,25 @@ public final class SettingsStore: ObservableObject {
     @Published public var logSentData: Bool {
         didSet { defaults.set(logSentData, forKey: key("logSentData")) }
     }
-    /// 纯文本日志中文兼容: GBK 设备输出自动转码为 UTF-8(HEX 类格式不受影响, 始终保留原始字节)
+    /// clean 日志中文兼容: GBK 设备输出自动转码为 UTF-8(raw 与 HEX 类格式不受影响, 始终保留原始字节)
     @Published public var logGBKCompatible: Bool {
         didSet { defaults.set(logGBKCompatible, forKey: key("logGBKCompatible")) }
+    }
+    /// raw 原始日志双份保存(全量原始字节含 CR/退格/ANSI/GBK, 不受 clean 选项影响)
+    @Published public var logRawEnabled: Bool {
+        didSet { defaults.set(logRawEnabled, forKey: key("logRawEnabled")) }
+    }
+    /// clean 日志: 去除 ANSI 转义序列(仅纯文本格式)
+    @Published public var logCleanStripANSI: Bool {
+        didSet { defaults.set(logCleanStripANSI, forKey: key("logCleanStripANSI")) }
+    }
+    /// clean 日志: CR 回车符处理(仅纯文本格式)
+    @Published public var logCleanCRMode: LogCRHandling {
+        didSet { defaults.set(logCleanCRMode.rawValue, forKey: key("logCleanCRMode")) }
+    }
+    /// clean 日志: 退格回显处理(仅纯文本格式)
+    @Published public var logCleanBSMode: LogBSHandling {
+        didSet { defaults.set(logCleanBSMode.rawValue, forKey: key("logCleanBSMode")) }
     }
 
     public var logDirectory: URL {
@@ -200,6 +216,10 @@ public final class SettingsStore: ObservableObject {
         logTimestamps    = bool("logTimestamps", true)
         logSentData      = bool("logSentData", true)
         logGBKCompatible = bool("logGBKCompatible", true)
+        logRawEnabled     = bool("logRawEnabled", true)
+        logCleanStripANSI = bool("logCleanStripANSI", true)
+        logCleanCRMode    = LogCRHandling(rawValue: d.string(forKey: "CH9140Bridge.logCleanCRMode") ?? "") ?? .strip
+        logCleanBSMode    = LogBSHandling(rawValue: d.string(forKey: "CH9140Bridge.logCleanBSMode") ?? "") ?? .apply
 
         portName       = d.string(forKey: "CH9140Bridge.portName") ?? "CH9140"
         autoCreatePort = bool("autoCreatePort", true)

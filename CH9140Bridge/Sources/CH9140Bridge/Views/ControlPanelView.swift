@@ -279,6 +279,22 @@ struct ControlPanelView: View {
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
+                // raw 原始日志文件(全量原始字节, 不受 clean 选项影响)
+                if let raw = logger.rawFileURL {
+                    Text(verbatim: raw.path)
+                        .font(.system(.caption2, design: .monospaced))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                        .help("raw 原始日志(取证用)\n" + raw.path)
+                }
+                // clean 过滤摘要
+                if logger.currentFileURL != nil {
+                    Text(cleanSummary)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
 
                 Divider().padding(.vertical, 2)
 
@@ -346,6 +362,26 @@ struct ControlPanelView: View {
         } label: {
             Label("会话日志", systemImage: "doc.text")
         }
+    }
+
+    /// clean 日志当前过滤摘要(显示在日志文件路径下方)
+    private var cleanSummary: String {
+        var parts: [String] = []
+        if !settings.logSentData { parts.append("不含TX") }
+        if !settings.logTimestamps { parts.append("无时间戳") }
+        if settings.logCleanStripANSI { parts.append("去ANSI") }
+        switch settings.logCleanCRMode {
+        case .keep: break
+        case .strip: parts.append("去CR")
+        case .apply: parts.append("应用CR")
+        }
+        switch settings.logCleanBSMode {
+        case .keep: break
+        case .strip: parts.append("删退格")
+        case .apply: parts.append("抹退格")
+        }
+        if settings.logGBKCompatible { parts.append("GBK转码") }
+        return parts.isEmpty ? "clean: 全部原样" : "clean: " + parts.joined(separator: " · ")
     }
 
     /// 无日志文件时的提示文案(区分未开启/未连接/已手动结束)

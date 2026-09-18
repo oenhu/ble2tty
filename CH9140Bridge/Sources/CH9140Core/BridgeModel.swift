@@ -150,7 +150,14 @@ public final class BridgeModel: ObservableObject {
 
     // MARK: - BLE 事件接线
 
+    private var cancellables = Set<AnyCancellable>()
+
     private func wireBLE() {
+        // raw 原始日志开关: 会话进行中切换立即生效(补开/收尾文件)
+        settings.$logRawEnabled.dropFirst().sink { [weak self] on in
+            self?.logger.setRawEnabled(on)
+        }.store(in: &cancellables)
+
         ble.onReceive = { [weak self] data in
             guard let self else { return }
             self.addBytes(rx: UInt64(data.count))
@@ -159,7 +166,10 @@ public final class BridgeModel: ObservableObject {
                 self.logger.log(data, direction: .rx,
                                 format: self.settings.logFormat,
                                 timestamps: self.settings.logTimestamps,
-                                decodeGBK: self.settings.logGBKCompatible)
+                                decodeGBK: self.settings.logGBKCompatible,
+                                stripANSI: self.settings.logCleanStripANSI,
+                                cr: self.settings.logCleanCRMode,
+                                bs: self.settings.logCleanBSMode)
             }
             self.appendStreamChunk(data, kind: .rx)
             self.onRawRX?(data)
@@ -223,11 +233,16 @@ public final class BridgeModel: ObservableObject {
             self.addBytes(tx: UInt64(data.count))
             self.ble.send(data)
             DispatchQueue.main.async {
-                if self.settings.logEnabled, self.settings.logSentData {
+                // raw 永远全量含 TX; logSentData 只决定 clean 是否包含
+                if self.settings.logEnabled, self.settings.logSentData || self.settings.logRawEnabled {
                     self.logger.log(data, direction: .tx,
                                     format: self.settings.logFormat,
                                     timestamps: self.settings.logTimestamps,
-                                    decodeGBK: self.settings.logGBKCompatible)
+                                    decodeGBK: self.settings.logGBKCompatible,
+                                    stripANSI: self.settings.logCleanStripANSI,
+                                    cr: self.settings.logCleanCRMode,
+                                    bs: self.settings.logCleanBSMode,
+                                    includeClean: self.settings.logSentData)
                 }
                 self.appendStreamChunk(data, kind: .tx)
             }
@@ -329,7 +344,8 @@ public final class BridgeModel: ObservableObject {
                            header: header,
                            mode: settings.logStorageMode,
                            template: settings.logNameTemplate,
-                           customName: settings.logCustomName)
+                           customName: settings.logCustomName,
+                           rawEnabled: settings.logRawEnabled)
         appendSystem("已开启新的日志会话")
     }
 
@@ -346,9 +362,12 @@ public final class BridgeModel: ObservableObject {
         guard !data.isEmpty, ble.isReady else { return }
         addBytes(tx: UInt64(data.count))
         ble.send(data)
-        if settings.logEnabled, settings.logSentData {
+        if settings.logEnabled, settings.logSentData || settings.logRawEnabled {
             logger.log(data, direction: .tx, format: settings.logFormat, timestamps: settings.logTimestamps,
-                       decodeGBK: settings.logGBKCompatible)
+                       decodeGBK: settings.logGBKCompatible,
+                       stripANSI: settings.logCleanStripANSI,
+                       cr: settings.logCleanCRMode, bs: settings.logCleanBSMode,
+                       includeClean: settings.logSentData)
         }
         flushPendings()
         appendLine(TerminalLine(kind: .tx, data: data))
@@ -359,9 +378,12 @@ public final class BridgeModel: ObservableObject {
         guard !data.isEmpty, ble.isReady else { return }
         addBytes(tx: UInt64(data.count))
         ble.send(data)
-        if settings.logEnabled, settings.logSentData {
+        if settings.logEnabled, settings.logSentData || settings.logRawEnabled {
             logger.log(data, direction: .tx, format: settings.logFormat, timestamps: settings.logTimestamps,
-                       decodeGBK: settings.logGBKCompatible)
+                       decodeGBK: settings.logGBKCompatible,
+                       stripANSI: settings.logCleanStripANSI,
+                       cr: settings.logCleanCRMode, bs: settings.logCleanBSMode,
+                       includeClean: settings.logSentData)
         }
     }
 

@@ -94,13 +94,6 @@ private struct LoggingSettingsTab: View {
         Form {
             Section {
                 Toggle("默认保存日志(连接后自动记录会话)", isOn: $settings.logEnabled)
-                Toggle("日志中包含发送到设备的数据(TX)", isOn: $settings.logSentData)
-                    .disabled(!settings.logEnabled)
-                Toggle("每行附加时间戳与方向", isOn: $settings.logTimestamps)
-                    .disabled(!settings.logEnabled)
-                Toggle("中文兼容(GBK 设备输出自动转 UTF-8)", isOn: $settings.logGBKCompatible)
-                    .disabled(!settings.logEnabled)
-                    .help("华为/H3C 等国产设备控制台用 GBK 编码输出中文, 原样保存在 UTF-8 编辑器中是乱码; 开启后纯文本日志自动转码。仅对「纯文本」格式生效, HEX 类格式始终保留原始字节。")
                 Picker("日志格式", selection: $settings.logFormat) {
                     ForEach(LogFormat.allCases) { Text($0.rawValue).tag($0) }
                 }
@@ -117,6 +110,42 @@ private struct LoggingSettingsTab: View {
                     .foregroundStyle(.secondary)
             } header: {
                 Text("会话日志").font(.headline)
+            }
+
+            Section {
+                Toggle("双份保存 raw 原始日志", isOn: $settings.logRawEnabled)
+                    .disabled(!settings.logEnabled)
+                Text("raw 永远全量保留线上原始字节(CR/退格/ANSI 转义/GBK 编码均不处理), 带时间戳与方向, 保存在日志目录 raw/ 子目录(<名字>.raw.log), 用于排查取证; 不受 clean 选项影响。会话进行中切换立即生效。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("raw 原始日志").font(.headline)
+            }
+
+            Section {
+                Toggle("日志中包含发送到设备的数据(TX)", isOn: $settings.logSentData)
+                    .disabled(!settings.logEnabled)
+                Toggle("每行附加时间戳与方向", isOn: $settings.logTimestamps)
+                    .disabled(!settings.logEnabled)
+                    .help("关闭后输出行不带前缀、方向切换不强制断行, 得到连续文本便于整段复制(建议搭配关闭 TX)")
+                Toggle("去除 ANSI 转义序列", isOn: $settings.logCleanStripANSI)
+                    .disabled(!settings.logEnabled)
+                    .help("剥离 ESC[A 之类的光标/颜色控制序列(方向键翻历史命令产生)")
+                Picker("CR 回车符", selection: $settings.logCleanCRMode) {
+                    ForEach(LogCRHandling.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .disabled(!settings.logEnabled)
+                .help("原样保留: 编辑器里可见 ^M\n去除: CRLF 只留 LF\n应用行内重绘: 进度条类覆盖输出只保留最终内容")
+                Picker("退格回显", selection: $settings.logCleanBSMode) {
+                    ForEach(LogBSHandling.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .disabled(!settings.logEnabled)
+                .help("原样保留: 保留 0x08/0x7F 字节\n删除控制字节: 仅去掉控制字符\n应用抹除: 按终端语义真正抹掉前一字符, 所见即所得")
+                Toggle("中文兼容(GBK 设备输出自动转 UTF-8)", isOn: $settings.logGBKCompatible)
+                    .disabled(!settings.logEnabled)
+                    .help("华为/H3C 等国产设备控制台用 GBK 编码输出中文, 原样保存在 UTF-8 编辑器中是乱码; 开启后自动转码")
+            } header: {
+                Text("clean 日志选项(仅纯文本格式生效)").font(.headline)
             }
 
             Section {

@@ -446,6 +446,139 @@ do {
     try? FileManager.default.removeItem(at: dir)
 }
 
+print("== 日志双份保存与 clean 过滤 ==")
+do {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("CH9140SelfTest-\(UUID().uuidString)")
+    let rawDir = dir.appendingPathComponent("raw")
+
+    /// raw 文件重组: 数据行均有 31 字节 "[yyyy-MM-dd HH:mm:ss.SSS] [RX] " 前缀;
+    /// 结尾 " ⏎" 的换行是插入的(剔除), 其余换行来自线上(还原)
+    func rebuildRaw(_ name: String) -> Data {
+        guard let data = try? Data(contentsOf: rawDir.appendingPathComponent(name)) else { return Data() }
+        var out = Data()
+        var bannerSeen = 0
+        for slice in data.split(separator: 0x0A, omittingEmptySubsequences: false) {
+            let line = Data(slice)
+            if bannerSeen < 2 {
+                if line.starts(with: [UInt8](repeating: 0x3D, count: 8)) { bannerSeen += 1 }
+                continue
+            }
+            if line.starts(with: Array("-----".utf8)) { break }  // footer
+            if line.isEmpty { continue }                          // banner 后空行
+            guard line.count >= 31, line.starts(with: [0x5B, 0x32]) else { continue }  // "[2"
+            var payload = Data(line.dropFirst(31))
+            if payload.count >= 4, Array(payload.suffix(4)) == [0x20, 0xE2, 0x8F, 0x8E] {
+                payload.removeLast(4)
+                out.append(payload)
+            } else {
+                out.append(payload)
+                out.append(0x0A)
+            }
+        }
+        return out
+    }
+
+    // ── A. 双份保存 + 过滤全开 + 同步切割 ──
+    let logger = SessionLogger()
+    logger.openSession(directory: dir, deviceName: "T", header: "双份测试",
+                       mode: .perSession, template: "dual_{seq}", rawEnabled: true)
+    let part1: [(LogDirection, [UInt8])] = [
+        (.rx, Array("Ruijie>".utf8)),          // 开放行
+        (.tx, Array("en".utf8)),               // 方向切换 → rx 行强制 ⏎
+        (.tx, [0x7F]),                         // DEL 回删
+        (.tx, Array("able\r\n".utf8)),       // BS 应用抹除 → "eable"
+        (.rx, [0x1B]),                         // ANSI 跨包: ESC
+        (.rx, [0x5B, 0x41]),                   //        "[A"
+        (.rx, [0xCB, 0xDE, 0xD6, 0xDD]),       // GBK "宿州"
+        (.rx, Array("\r\n".utf8)),
+    ]
+    for (d, bytes) in part1 {
+        logger.log(Data(bytes), direction: d, format: .ascii, timestamps: true,
+                   decodeGBK: true, stripANSI: true, cr: .strip, bs: .apply)
+    }
+    let stream1 = Data(part1.flatMap { $0.1 })
+    logger.rotateSession { _ in }
+    Thread.sleep(forTimeInterval: 0.4)
+    let part2: [(LogDirection, [UInt8])] = [(.rx, Array("after\r\n".utf8))]
+    for (d, bytes) in part2 {
+        logger.log(Data(bytes), direction: d, format: .ascii, timestamps: true,
+                   decodeGBK: true, stripANSI: true, cr: .strip, bs: .apply)
+    }
+    let stream2 = Data(part2.flatMap { $0.1 })
+    Thread.sleep(forTimeInterval: 0.5)
+    logger.closeSession()
+    Thread.sleep(forTimeInterval: 0.5)
+
+    let rawFiles = (try? FileManager.default.contentsOfDirectory(atPath: rawDir.path)) ?? []
+    check(rawFiles.contains("dual_1.raw.log") && rawFiles.contains("dual_2.raw.log"),
+          "raw 子目录配对命名与同步切割", rawFiles.joined())
+    check(rebuildRaw("dual_1.raw.log") == stream1, "raw 逐字节等于线上流(过滤全开)",
+          "重组 \(rebuildRaw("dual_1.raw.log").count)/原 \(stream1.count) 字节")
+    check(rebuildRaw("dual_2.raw.log") == stream2, "raw 切割后第二段逐字节一致")
+
+    if let cleanData = try? Data(contentsOf: dir.appendingPathComponent("dual_1.log")),
+       let cleanText = String(data: cleanData, encoding: .utf8) {
+        check(cleanText.contains("Ruijie> ⏎"), "clean 方向切换强制断行标记", cleanText)
+        check(cleanText.contains("[TX] eable"), "clean 退格应用抹除(DEL 回删)", cleanText)
+        check(cleanText.contains("宿州"), "clean GBK 转码保留中文", cleanText)
+        check(!cleanData.contains(0x1B), "clean ANSI 转义剥离(含跨包)")
+        check(!cleanData.contains(0x0D), "clean CR 已去除")
+    } else { check(false, "clean 文件读取", "dual_1.log") }
+
+    // ── B. 退格三档 ──
+    func runBS(_ template: String, _ bs: LogBSHandling) -> Data {
+        let l = SessionLogger()
+        l.openSession(directory: dir, deviceName: "T", header: "t", mode: .perSession, template: template)
+        l.log(Data("lisy\u{08} \u{08}t\r\n".utf8), direction: .rx, format: .ascii, timestamps: false, bs: bs)
+        Thread.sleep(forTimeInterval: 0.4)
+        l.closeSession()
+        Thread.sleep(forTimeInterval: 0.3)
+        return (try? Data(contentsOf: dir.appendingPathComponent(template + ".log"))) ?? Data()
+    }
+    check(runBS("bs_keep", .keep).contains(0x08), "退格原样保留 0x08")
+    let bsStrip = String(decoding: runBS("bs_strip", .strip), as: UTF8.self)
+    check(bsStrip.contains("lisy t"), "退格删除控制字节", bsStrip)
+    let bsApply = String(decoding: runBS("bs_apply", .apply), as: UTF8.self)
+    check(bsApply.contains("list\r\n") && !bsApply.contains("lisy"), "退格应用抹除", bsApply)
+
+    // ── C. CR 三档 ──
+    func runCR(_ template: String, _ text: String, _ cr: LogCRHandling) -> Data {
+        let l = SessionLogger()
+        l.openSession(directory: dir, deviceName: "T", header: "t", mode: .perSession, template: template)
+        l.log(Data(text.utf8), direction: .rx, format: .ascii, timestamps: false, cr: cr)
+        Thread.sleep(forTimeInterval: 0.4)
+        l.closeSession()
+        Thread.sleep(forTimeInterval: 0.3)
+        return (try? Data(contentsOf: dir.appendingPathComponent(template + ".log"))) ?? Data()
+    }
+    check(String(decoding: runCR("cr_keep", "a\r\nb\r\n", .keep), as: UTF8.self).contains("a\r\nb\r\n"),
+          "CR 原样保留")
+    let crStrip = String(decoding: runCR("cr_strip", "a\r\nb\r\n", .strip), as: UTF8.self)
+    check(crStrip.contains("a\nb\n") && !crStrip.contains("\r"), "CR 去除", crStrip)
+    let crApply = String(decoding: runCR("cr_apply", "10%\r99%\r\n", .apply), as: UTF8.self)
+    check(crApply.contains("99%\n") && !crApply.contains("10%"), "CR 应用行内重绘", crApply)
+
+    // ── D. raw 中途开关 ──
+    let l2 = SessionLogger()
+    l2.openSession(directory: dir, deviceName: "T", header: "t",
+                   mode: .perSession, template: "toggle_{seq}", rawEnabled: false)
+    l2.log(Data("x\r\n".utf8), direction: .rx, format: .ascii, timestamps: false)
+    Thread.sleep(forTimeInterval: 0.4)
+    check(!FileManager.default.fileExists(atPath: rawDir.appendingPathComponent("toggle_1.raw.log").path),
+          "raw 关闭时不建文件")
+    l2.setRawEnabled(true)
+    Thread.sleep(forTimeInterval: 0.4)
+    l2.log(Data("y\r\n".utf8), direction: .rx, format: .ascii, timestamps: false)
+    l2.closeSession()
+    Thread.sleep(forTimeInterval: 0.4)
+    let toggleRaw = try? Data(contentsOf: rawDir.appendingPathComponent("toggle_1.raw.log"))
+    check(toggleRaw?.contains(Data("y\r\n".utf8)) == true && toggleRaw?.contains(Data("x\r\n".utf8)) == false,
+          "raw 中途开启只含之后的数据")
+
+    try? FileManager.default.removeItem(at: dir)
+}
+
 print("== LineAssembler 行装配 ==")
 do {
     func B(_ s: String) -> Data { Data(s.utf8) }
