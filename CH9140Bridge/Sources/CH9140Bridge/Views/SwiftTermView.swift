@@ -54,6 +54,7 @@ struct SwiftTermView: NSViewRepresentable {
         private var frostedApplied: Bool?
         private var clickMonitor: Any?
         private var resignKeyObserver: NSObjectProtocol?
+        private var appearanceObserver: NSKeyValueObservation?
 
         init(onSend: @escaping (Data) -> Void) { self.onSend = onSend }
 
@@ -75,6 +76,25 @@ struct SwiftTermView: NSViewRepresentable {
             effectView?.isHidden = !on
             tintView?.isHidden = !on
             tv.backgroundOpacity = on ? 0 : 1
+        }
+
+        /// 按系统外观调整压暗层强度:
+        /// 毛玻璃透出的是窗口背后的内容, 浅色外观下常是亮白桌面,
+        /// 35% 的压暗会叠成中灰导致亮色终端文字不可读;
+        /// 浅色加深到 70%(即使纯白背景等效亮度也压到 ~30%, 白字对比度约 8.6:1),
+        /// 深色外观背后内容本来就暗, 维持 35% 保留更多通透感。
+        func updateTintStrength() {
+            let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            let alpha: CGFloat = isDark ? 0.35 : 0.70
+            tintView?.layer?.backgroundColor = NSColor.black.withAlphaComponent(alpha).cgColor
+        }
+
+        /// 监听系统外观切换, 实时刷新压暗层(无需重启 App)
+        func startAppearanceWatch() {
+            updateTintStrength()
+            appearanceObserver = NSApp.observe(\.effectiveAppearance) { [weak self] _, _ in
+                self?.updateTintStrength()
+            }
         }
 
         /// 输入法守卫: 点击终端区域 -> 切英文; 点击落在他处且焦点在终端 -> 恢复; 窗口失焦 -> 恢复
@@ -99,6 +119,8 @@ struct SwiftTermView: NSViewRepresentable {
         func stopFocusWatch() {
             if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }
             if let o = resignKeyObserver { NotificationCenter.default.removeObserver(o); resignKeyObserver = nil }
+            appearanceObserver?.invalidate()
+            appearanceObserver = nil
         }
     }
 
@@ -113,10 +135,9 @@ struct SwiftTermView: NSViewRepresentable {
         effect.blendingMode = .behindWindow
         effect.state = .active
 
-        // 压暗层: 保证终端文字在明亮桌面背景上的可读性
+        // 压暗层: 保证终端文字在明亮桌面背景上的可读性(强度随系统外观自适应)
         let tint = NSView()
         tint.wantsLayer = true
-        tint.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.35).cgColor
 
         let tv = SwiftTerm.TerminalView(frame: .zero)
         tv.terminalDelegate = context.coordinator
@@ -142,6 +163,7 @@ struct SwiftTermView: NSViewRepresentable {
             tv.feed(byteArray: Array(data)[...])
         }
         context.coordinator.startFocusWatch(tv)
+        context.coordinator.startAppearanceWatch()
         context.coordinator.setFrosted(frostedGlass)
 
         // 欢迎横幅
