@@ -52,10 +52,13 @@ public final class SessionLogger: ObservableObject {
     /// 默认文件名模板
     public static let defaultTemplate = "CH9140_{device}_{datetime}"
 
+    /// 单文件(clean+raw 合计)大小上限: 超过自动切割换新文件, 防止追加模式无限增长
+    public static var maxFileBytes: UInt64 = 512 * 1024 * 1024
+
     @Published public private(set) var currentFileURL: URL?
     /// raw 原始日志文件路径(未启用或无会话时为 nil)
     @Published public private(set) var rawFileURL: URL?
-    /// 双文件合计已写字节
+    /// 当前文件(clean+raw 合计)已写字节, 开新文件(会话/切割/跨午夜)时清零
     @Published public private(set) var bytesWritten: UInt64 = 0
 
     private let queue = DispatchQueue(label: "cn.wch.CH9140Bridge.logger", qos: .utility)
@@ -94,6 +97,21 @@ public final class SessionLogger: ObservableObject {
     private var pendingBytes: UInt64 = 0
     private var byteFlushScheduled = false
 
+    /// 打开/写盘失败回调(主线程): 让"日志没写成"立即可见;
+    /// 同一会话只报一次, 避免磁盘满时逐包刷屏
+    public var onError: ((String) -> Void)?
+    private var errorReported = false
+
+    /// 当前文件(clean+raw 合计)已写字节: 大小上限自动切割的依据, 开新文件时清零
+    private var sessionFileBytes: UInt64 = 0
+    /// 大小上限触发的切割序号(追加模式同名文件会持续追加, 用 -pN 保证新文件)
+    private var sizeSeqForFile = 0
+    /// 最近一次 clean 写入的选项签名: 会话中途变更时在文件里留系统标记行
+    private var cleanSig: String?
+    /// 会话开启时的 clean 格式/时间戳(banner 图例按实际生成; 选项变更时同步更新)
+    private var cleanFormat: LogFormat = .ascii
+    private var cleanTimestamps = true
+
     /// clean 纯文本的每方向行装配状态
     private struct CleanLine {
         var buf = Data()      // 当前行内容(已过滤)
@@ -107,14 +125,26 @@ public final class SessionLogger: ObservableObject {
 
     deinit { try? handle?.close(); try? rawHandle?.close() }
 
+    /// 在 queue 上调用: 上报一次错误(会话内去重, 数据通路不受影响)
+    private func reportErrorLocked(_ message: String) {
+        guard !errorReported else { return }
+        errorReported = true
+        DispatchQueue.main.async { self.onError?(message) }
+    }
+
     // MARK: - 会话生命周期
 
     /// 开启一个新的日志会话(连接建立时调用)
+    /// - Parameters:
+    ///   - format/timestamps: 会话开启时的 clean 选项, 仅用于生成与文件内容相符的 banner 图例
+    ///   - completion: 主线程回调结果——成功为新文件 URL, 失败为 nil(同时经 onError 上报原因)
     public func openSession(directory: URL, deviceName: String?, header: String,
                             mode: LogStorageMode = .perSession,
                             template: String = SessionLogger.defaultTemplate,
                             customName: String = "",
-                            rawEnabled: Bool = false) {
+                            rawEnabled: Bool = false,
+                            format: LogFormat = .ascii, timestamps: Bool = true,
+                            completion: ((URL?) -> Void)? = nil) {
         queue.async {
             self.closeLocked()
             self.mode = mode
@@ -124,13 +154,29 @@ public final class SessionLogger: ObservableObject {
             self.template = template
             self.customName = customName
             self.rawEnabled = rawEnabled
-            self.openFileLocked(bannerNote: nil)
+            self.cleanFormat = format
+            self.cleanTimestamps = timestamps
+            self.errorReported = false
+            self.sizeSeqForFile = 0
+            let url = self.openFileLocked(bannerNote: nil)
+            DispatchQueue.main.async { completion?(url) }
         }
     }
 
     /// 结束当前会话(断开连接时调用)
     public func closeSession() {
         queue.async {
+            self.closeLocked()
+            self.directory = nil
+            self.deviceName = nil
+        }
+    }
+
+    /// 进程退出前的同步收尾(applicationWillTerminate 中调用):
+    /// 冲刷开放行与半字暂存、写会话 footer, 阻塞直到落盘完成再返回。
+    /// (logger 队列只向主线程 async 投递, 主线程 sync 等待无死锁)
+    public func closeSessionSync() {
+        queue.sync {
             self.closeLocked()
             self.directory = nil
             self.deviceName = nil
@@ -176,9 +222,11 @@ public final class SessionLogger: ObservableObject {
 
     // MARK: - 文件打开
 
-    /// 在 queue 上调用: 按 mode + 模板计算文件路径并打开
-    private func openFileLocked(bannerNote: String?) {
-        guard let directory else { return }
+    /// 在 queue 上调用: 按 mode + 模板计算文件路径并打开; 成功返回文件 URL, 失败返回 nil 并上报
+    /// - Parameter sizeSeq: 大小上限触发的切割序号(>0 时追加 -pN, 保证追加模式也换新文件)
+    @discardableResult
+    private func openFileLocked(bannerNote: String?, sizeSeq: Int = 0) -> URL? {
+        guard let directory else { return nil }
         let now = Date()
         let day = Self.dayFormatter.string(from: now)
         let degradeTime = (mode == .dailyFile)
@@ -192,6 +240,9 @@ public final class SessionLogger: ObservableObject {
         var name = Self.resolveTemplate(template, deviceName: deviceName ?? "CH9140",
                                         customName: customName, date: now,
                                         seq: seq, degradeTime: degradeTime)
+        if sizeSeq > 0 {   // 大小上限切割: 追加模式下同名文件会持续追加, 用 -pN 保证换新文件
+            name += "-p\(sizeSeq)"
+        }
         var url = folder.appendingPathComponent(name + ".log")
 
         // 非追加模式下保证不覆盖已有文件:
@@ -232,6 +283,9 @@ public final class SessionLogger: ObservableObject {
             self.openedDayStamp = day
             self.currentBaseName = name
             self.cleanLines.removeAll()
+            self.cleanSig = nil
+            self.sessionFileBytes = 0
+            self.pendingBytes = 0         // 字节统计按当前文件重新起算
 
             var bannerText = """
 
@@ -240,18 +294,20 @@ public final class SessionLogger: ObservableObject {
              设备: \(deviceName ?? "未知")
              开始时间: \(Self.lineStampFormatter.string(from: now))
              \(header)
-             格式: 每行以 [时间] [方向] 开头(RX=芯片→主机, TX=主机→芯片);
-                   行尾 "⏎" 表示该行无线上换行符, 因方向切换或会话收尾被强制断行。
+             \(Self.cleanLegend(format: cleanFormat, timestamps: cleanTimestamps))
 
             """
             if let note = bannerNote { bannerText += "     (\(note))\n" }
             bannerText += "============================================================\n\n"
             h.write(Data(bannerText.utf8))
             bumpBytes(UInt64(bannerText.utf8.count))
-            DispatchQueue.main.async { self.currentFileURL = url }
+            DispatchQueue.main.async { self.currentFileURL = url; self.bytesWritten = 0 }
             if self.rawEnabled { self.openRawLocked(bannerNote: bannerNote) }
+            return url
         } catch {
             DispatchQueue.main.async { self.currentFileURL = nil }
+            self.reportErrorLocked("日志文件创建失败(\(url.lastPathComponent)): \(error.localizedDescription)")
+            return nil
         }
     }
 
@@ -302,32 +358,25 @@ public final class SessionLogger: ObservableObject {
             DispatchQueue.main.async { self.rawFileURL = url }
         } catch {
             DispatchQueue.main.async { self.rawFileURL = nil }
+            self.reportErrorLocked("raw 原始日志创建失败(\(url.lastPathComponent)): \(error.localizedDescription)")
         }
     }
 
     private func closeLocked() {
         // clean 文件收尾
         if let h = handle {
-            // 转码暂存的半个字符等不到下文: 以 U+FFFD 标记进入对应方向的行缓冲, 不静默丢字节
+            // 转码暂存的半个字符等不到下文: 以 U+FFFD 标记追加到对应方向的行尾, 不静默丢字节
+            // (必须追加到 buf 末尾——CR/退格 apply 模式下 cursor 可能在行中, 覆盖写会吃掉已有内容)
             for (d, carry) in self.textCarry where !carry.isEmpty {
                 var st = self.cleanLines[d] ?? CleanLine()
-                self.putCleanByte(0xEF, into: &st)   // U+FFFD = EF BF BD
-                self.putCleanByte(0xBF, into: &st)
-                self.putCleanByte(0xBD, into: &st)
+                st.buf.append(contentsOf: [0xEF, 0xBF, 0xBD])   // U+FFFD
+                st.cursor = st.buf.count
+                st.open = true
                 self.cleanLines[d] = st
             }
             self.textCarry.removeAll()
             // 冲刷未闭合行: 时间戳模式补 ⏎ 标记并断行; 无时间戳模式保持字节精确(不补换行)
-            for d in [LogDirection.rx, .tx] {
-                if let st = self.cleanLines[d], st.open {
-                    h.write(self.renderCleanLine(st, direction: d,
-                                                 timestamps: self.lastCleanTimestamps,
-                                                 cr: self.lastCleanCR, bs: self.lastCleanBS,
-                                                 marker: self.lastCleanTimestamps,
-                                                 newline: self.lastCleanTimestamps))
-                }
-            }
-            self.cleanLines.removeAll()
+            self.flushOpenCleanLinesLocked(to: h)
             let footer = "\n----- 会话结束 \(Self.lineStampFormatter.string(from: Date())) -----\n"
             h.write(Data(footer.utf8))
             try? h.close()
@@ -354,9 +403,24 @@ public final class SessionLogger: ObservableObject {
         DispatchQueue.main.async { self.rawFileURL = nil }
     }
 
+    /// 冲刷两个方向的未闭合行(按最近一次的 clean 选项渲染; 供会话收尾与选项变更标记复用)
+    private func flushOpenCleanLinesLocked(to h: FileHandle) {
+        for d in [LogDirection.rx, .tx] {
+            if let st = self.cleanLines[d], st.open {
+                h.write(self.renderCleanLine(st, direction: d,
+                                             timestamps: self.lastCleanTimestamps,
+                                             cr: self.lastCleanCR, bs: self.lastCleanBS,
+                                             marker: self.lastCleanTimestamps,
+                                             newline: self.lastCleanTimestamps))
+            }
+        }
+        self.cleanLines.removeAll()
+    }
+
     /// 在 queue 上调用: 累计已写字节, 以 <=5Hz 的节奏发布到主线程
     private func bumpBytes(_ n: UInt64) {
         pendingBytes &+= n
+        sessionFileBytes &+= n
         guard !byteFlushScheduled else { return }
         byteFlushScheduled = true
         queue.asyncAfter(deadline: .now() + 0.2) { [weak self] in
@@ -388,11 +452,31 @@ public final class SessionLogger: ObservableObject {
                     self.openFileLocked(bannerNote: "日期切换, 自动创建")
                 }
             }
+            // 单文件大小上限: 超过自动切割(clean/raw 一并换新), 防止追加模式无限增长
+            if self.handle != nil, self.sessionFileBytes >= Self.maxFileBytes {
+                self.closeLocked()
+                self.sizeSeqForFile += 1
+                let capText = Self.maxFileBytes >= 1024 * 1024
+                    ? "\(Self.maxFileBytes / 1024 / 1024) MB" : "\(Self.maxFileBytes) B"
+                self.openFileLocked(bannerNote: "超过单文件大小上限(\(capText)), 自动切割",
+                                    sizeSeq: self.sizeSeqForFile)
+            }
             // raw 原始日志: 线上字节零处理(不过滤/不转码), 流式行首前缀
             if let rh = self.rawHandle {
                 self.writeRawLocked(data, direction: direction, to: rh)
             }
             guard includeClean, let h = self.handle else { return }
+            // 会话进行中 clean 选项变更: 先冲刷开放行, 再留系统标记行(混合格式不再无提示)
+            let sig = "\(format.rawValue)|\(timestamps)|\(decodeGBK)|\(stripANSI)|\(cr.rawValue)|\(bs.rawValue)"
+            if let prev = self.cleanSig, prev != sig {
+                self.flushOpenCleanLinesLocked(to: h)
+                let mark = "----- 日志选项变更: 格式=\(format.rawValue) 时间戳=\(timestamps ? "开" : "关") GBK转码=\(decodeGBK ? "开" : "关") 剥离ANSI=\(stripANSI ? "开" : "关") CR=\(cr.rawValue) 退格=\(bs.rawValue) -----\n"
+                h.write(Data(mark.utf8))
+                self.bumpBytes(UInt64(mark.utf8.count))
+                self.cleanFormat = format       // 后续切割/跨午夜的新文件 banner 用最新选项
+                self.cleanTimestamps = timestamps
+            }
+            self.cleanSig = sig
             switch format {
             case .ascii:
                 self.writeCleanAsciiLocked(data, direction: direction, to: h,
@@ -413,7 +497,8 @@ public final class SessionLogger: ObservableObject {
                     try h.write(contentsOf: out)
                     self.bumpBytes(UInt64(out.count))
                 } catch {
-                    // 磁盘写失败时静默丢弃, 避免影响数据通路
+                    // 上报一次(会话内去重), 数据通路不受影响
+                    self.reportErrorLocked("日志写盘失败: \(error.localizedDescription)")
                 }
             }
         }
@@ -450,13 +535,15 @@ public final class SessionLogger: ObservableObject {
             try h.write(contentsOf: out)
             self.bumpBytes(UInt64(out.count))
         } catch {
-            // 磁盘写失败时静默丢弃, 避免影响数据通路
+            // 上报一次(会话内去重), 数据通路不受影响
+            self.reportErrorLocked("raw 日志写盘失败: \(error.localizedDescription)")
         }
     }
 
-    /// clean 纯文本: GBK 转码 → ANSI 剥离 → 行装配(CR/退格按策略) → 成行写盘
+    /// clean 纯文本: GBK 转码 → ANSI 剥离 → (按需)行装配 → 写盘
     /// 时间戳开: 每行带 [时间] [方向] 前缀, 方向切换强制断行补 ⏎(单行单方向);
-    /// 时间戳关: 不带前缀也不断行, 与旧版字节语义一致(仅多了可选过滤)
+    /// 时间戳关且 CR/退格非 apply: 过滤后按块直写——字节精确、保到达序、零滞留;
+    /// 时间戳关但含 apply: 行装配应用覆盖写, 方向切换强制断行(无前缀无标记)
     private func writeCleanAsciiLocked(_ data0: Data, direction: LogDirection, to h: FileHandle,
                                        timestamps: Bool, decodeGBK: Bool, stripANSI: Bool,
                                        cr: LogCRHandling, bs: LogBSHandling) {
@@ -465,6 +552,11 @@ public final class SessionLogger: ObservableObject {
         self.lastCleanBS = bs
         // 0x0A 不出现在 UTF-8/GBK 多字节字符与 ANSI 序列内, 转码/剥离后再分行是安全的
         var data = decodeGBK ? self.decodeTextChunk(data0, direction: direction) : data0
+        // 转码开关中途关闭: 残留的跨包半字立即以 U+FFFD 标记吐出, 不再滞留到会话收尾
+        if !decodeGBK, let carry = self.textCarry[direction], !carry.isEmpty {
+            self.textCarry[direction] = nil
+            data.insert(contentsOf: [0xEF, 0xBF, 0xBD], at: 0)
+        }
         var st = self.cleanLines[direction] ?? CleanLine()
         if stripANSI {
             data = self.stripANSILocked(data, st: &st)
@@ -473,17 +565,42 @@ public final class SessionLogger: ObservableObject {
             self.cleanLines[direction] = st
             return
         }
-        var out = Data()
-        if timestamps {
-            // 方向切换: 另一方向的开放行强制收尾, 保证单行单方向
-            let other: LogDirection = (direction == .rx) ? .tx : .rx
-            if let ost = self.cleanLines[other], ost.open {
-                out.append(self.renderCleanLine(ost, direction: other, timestamps: true,
-                                                cr: cr, bs: bs, marker: true, newline: true))
-                var fresh = ost                      // 保留 ANSI 暂存(流状态), 只清行缓冲
-                fresh.buf.removeAll(); fresh.cursor = 0; fresh.open = false
-                self.cleanLines[other] = fresh
+
+        // 直通路径: 无需前缀也无需行内重绘时, 过滤后按块立即落盘。
+        // 行装配只服务于"前缀/单行单方向"与"覆盖写"两类需求; 否则按方向攒行会造成
+        // 跨方向乱序(TX 落到后续 RX 之后)与无换行数据滞留(进程异常退出即丢失)。
+        guard timestamps || cr == .apply || bs == .apply else {
+            var out = Data()
+            out.reserveCapacity(data.count)
+            for b in data {
+                switch b {
+                case 0x0D:       if cr != .strip { out.append(b) }
+                case 0x08, 0x7F: if bs != .strip { out.append(b) }
+                default:         out.append(b)
+                }
             }
+            self.cleanLines[direction] = st   // 此处仅承载 ANSI 暂存状态
+            guard !out.isEmpty else { return }
+            do {
+                try h.write(contentsOf: out)
+                self.bumpBytes(UInt64(out.count))
+            } catch {
+                // 上报一次(会话内去重), 数据通路不受影响
+                self.reportErrorLocked("日志写盘失败: \(error.localizedDescription)")
+            }
+            return
+        }
+
+        var out = Data()
+        // 方向切换: 另一方向的开放行强制收尾, 保证单行单方向。
+        // (apply+无时间戳组合同样冲刷: apply 产出本就是"渲染视图", 放弃字节精确但须保到达序)
+        let other: LogDirection = (direction == .rx) ? .tx : .rx
+        if let ost = self.cleanLines[other], ost.open {
+            out.append(self.renderCleanLine(ost, direction: other, timestamps: timestamps,
+                                            cr: cr, bs: bs, marker: timestamps, newline: true))
+            var fresh = ost                      // 保留 ANSI 暂存(流状态), 只清行缓冲
+            fresh.buf.removeAll(); fresh.cursor = 0; fresh.open = false
+            self.cleanLines[other] = fresh
         }
         for b in data {
             switch b {
@@ -506,7 +623,7 @@ public final class SessionLogger: ObservableObject {
             default:
                 self.putCleanByte(b, into: &st)
             }
-            // 超长行保护: 设备久不发 LF 时防止内存堆积
+            // 超长行保护: 设备久不发 LF 时防止内存堆积(本路径必为缓冲模式, 断行不违背字节精确)
             if st.buf.count > 65536 {
                 out.append(self.renderCleanLine(st, direction: direction, timestamps: timestamps,
                                                 cr: cr, bs: bs, marker: timestamps, newline: true))
@@ -519,7 +636,8 @@ public final class SessionLogger: ObservableObject {
             try h.write(contentsOf: out)
             self.bumpBytes(UInt64(out.count))
         } catch {
-            // 磁盘写失败时静默丢弃, 避免影响数据通路
+            // 上报一次(会话内去重), 数据通路不受影响
+            self.reportErrorLocked("日志写盘失败: \(error.localizedDescription)")
         }
     }
 
@@ -579,7 +697,7 @@ public final class SessionLogger: ObservableObject {
         case 0x5D:  // OSC "]": BEL 或 ESC \ 结束
             if e.last == 0x07 { return true }
             return e.count >= 3 && e[e.index(e.endIndex, offsetBy: -2)] == 0x1B && e.last == 0x5C
-        case 0x28...0x2F:  // ESC ( X 之类的字符集序列
+        case 0x20...0x2F:  // ESC + 中间字节 + 末字节的三字节序列(ESC#8 DECALN / ESC(0 字符集等)
             return e.count >= 3
         default:           // 其余双字节序列(ESC c / ESC = 等)
             return true
@@ -690,28 +808,50 @@ public final class SessionLogger: ObservableObject {
         }
     }
 
+    /// banner 中的格式图例: 按会话实际格式/时间戳开关生成, 不再无条件宣称"每行有前缀"
+    static func cleanLegend(format: LogFormat, timestamps: Bool) -> String {
+        switch (format, timestamps) {
+        case (.ascii, true):
+            return "格式: 纯文本; 每行以 [时间] [方向] 开头(RX=芯片→主机, TX=主机→芯片);\n      行尾 \"⏎\" 表示该行无线上换行符, 因方向切换或会话收尾被强制断行。"
+        case (.ascii, false):
+            return "格式: 纯文本原始流(无方向前缀/时间戳, RX/TX 按到达序直写, 字节精确)。"
+        case (.hex, true):
+            return "格式: 十六进制; 每个数据块独立一行, 以 [时间] [方向] 开头(RX=芯片→主机, TX=主机→芯片)。"
+        case (.hex, false):
+            return "格式: 十六进制; 每个数据块独立一行(无前缀)。"
+        case (.both, true):
+            return "格式: HEX+文本; 每个数据块独立一行: [时间] [方向] HEX | ASCII(RX=芯片→主机, TX=主机→芯片)。"
+        case (.both, false):
+            return "格式: HEX+文本; 每个数据块独立一行: HEX | ASCII(无前缀)。"
+        }
+    }
+
     // MARK: - 格式化器
 
     public static let dayFormatter: DateFormatter = {
         let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")   // 固定格式: 非 Gregorian 日历下年份依然稳定
         f.dateFormat = "yyyy-MM-dd"
         return f
     }()
 
     static let fileStampFormatter: DateFormatter = {
         let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyyMMdd_HHmmss"
         return f
     }()
 
     static let timeStampFormatter: DateFormatter = {
         let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "HHmmss"
         return f
     }()
 
     static let lineStampFormatter: DateFormatter = {
         let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
         return f
     }()

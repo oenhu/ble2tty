@@ -302,6 +302,228 @@ do {
     check(false, "TX/RX 行隔离", error.localizedDescription)
 }
 
+print("== SessionLogger 无时间戳直通与保序 ==")
+do {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("CH9140SelfTest-\(UUID().uuidString)")
+    let logger = SessionLogger()
+    logger.openSession(directory: dir, deviceName: "T", header: "保序测试", mode: .perSession)
+    // 复现序列: RX 提示符(无 \n) → TX 命令 → RX 回显 → TX 尾段(无 \n)
+    logger.log(Data("Ruijie> ".utf8),         direction: .rx, format: .ascii, timestamps: false)
+    logger.log(Data("show clock\r".utf8),     direction: .tx, format: .ascii, timestamps: false)
+    logger.log(Data("16:30:36 UTC\r\n".utf8), direction: .rx, format: .ascii, timestamps: false)
+    logger.log(Data("abc".utf8),              direction: .tx, format: .ascii, timestamps: false)
+    Thread.sleep(forTimeInterval: 0.6)
+
+    // 零滞留: 未收尾、无换行的 TX 尾段此刻就应已在文件里
+    let f = try FileManager.default.contentsOfDirectory(atPath: dir.path).first!
+    let mid = try String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)
+    check(mid.contains("abc"), "无时间戳模式无换行数据立即落盘(零滞留)")
+
+    logger.closeSession()
+    Thread.sleep(forTimeInterval: 0.4)
+    let text = try String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)
+    if let i1 = text.range(of: "Ruijie> ")?.lowerBound,
+       let i2 = text.range(of: "show clock")?.lowerBound,
+       let i3 = text.range(of: "16:30:36")?.lowerBound,
+       let i4 = text.range(of: "abc")?.lowerBound {
+        check(i1 < i2 && i2 < i3 && i3 < i4, "无时间戳模式跨方向保到达序")
+    } else { check(false, "无时间戳模式跨方向保到达序", "文件缺数据段") }
+    try? FileManager.default.removeItem(at: dir)
+} catch {
+    check(false, "无时间戳直通与保序", error.localizedDescription)
+}
+
+print("== SessionLogger ANSI 三字节序列 ==")
+do {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("CH9140SelfTest-\(UUID().uuidString)")
+    let logger = SessionLogger()
+    logger.openSession(directory: dir, deviceName: "T", header: "ANSI 测试", mode: .perSession)
+    // ESC # 8(DECALN) 与 ESC % G 均为三字节序列, 末字节不得漏入文本
+    logger.log(Data([0x1B, 0x23, 0x38] + Array("hello\n".utf8)), direction: .rx,
+               format: .ascii, timestamps: false, stripANSI: true)
+    logger.log(Data([0x1B, 0x25, 0x47] + Array("world\n".utf8)), direction: .rx,
+               format: .ascii, timestamps: false, stripANSI: true)
+    Thread.sleep(forTimeInterval: 0.6)
+    logger.closeSession()
+    Thread.sleep(forTimeInterval: 0.4)
+    let f = try FileManager.default.contentsOfDirectory(atPath: dir.path).first!
+    let text = try String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)
+    check(text.contains("hello") && !text.contains("8hello"), "ESC#8 三字节序列完整剥离")
+    check(text.contains("world") && !text.contains("Gworld"), "ESC%%G 三字节序列完整剥离")
+    try? FileManager.default.removeItem(at: dir)
+} catch {
+    check(false, "ANSI 三字节序列", error.localizedDescription)
+}
+
+print("== SessionLogger 失败上报 ==")
+do {
+    // 用一个已存在的文件当目录: createDirectory 必失败
+    let blocker = FileManager.default.temporaryDirectory
+        .appendingPathComponent("CH9140SelfTest-blocker-\(UUID().uuidString)")
+    FileManager.default.createFile(atPath: blocker.path, contents: Data())
+    let logger = SessionLogger()
+    var reported = false
+    var callbackFired = false
+    var cbURL: URL? = URL(fileURLWithPath: "/placeholder")   // 区分"未回调"与"回调 nil"
+    logger.onError = { _ in reported = true }
+    logger.openSession(directory: blocker.appendingPathComponent("sub"),
+                       deviceName: "T", header: "失败测试") { url in
+        cbURL = url; callbackFired = true
+    }
+    check(waitMain { callbackFired }, "打开失败 completion 回调")
+    check(callbackFired && cbURL == nil, "打开失败回调 URL 为 nil")
+    check(waitMain { reported }, "打开失败 onError 上报")
+    try? FileManager.default.removeItem(at: blocker)
+}
+
+print("== SessionLogger 计数重置与大小上限 ==")
+do {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("CH9140SelfTest-\(UUID().uuidString)")
+    let logger = SessionLogger()
+    logger.openSession(directory: dir, deviceName: "T", header: "计数", mode: .perSession)
+    logger.log(Data("hello\r\n".utf8), direction: .rx, format: .ascii, timestamps: false)
+    check(waitMain { logger.bytesWritten > 0 }, "字节计数随写入增长")
+    logger.openSession(directory: dir, deviceName: "T", header: "计数2", mode: .perSession)
+    check(waitMain { logger.bytesWritten == 0 }, "新会话字节计数清零")
+    logger.closeSession()
+
+    // 单文件大小上限: cap=1 时任意写入后下一包必触发切割
+    let prevCap = SessionLogger.maxFileBytes
+    SessionLogger.maxFileBytes = 1
+    let logger2 = SessionLogger()
+    logger2.openSession(directory: dir, deviceName: "T", header: "上限",
+                        mode: .perSession, template: "cap_test")
+    Thread.sleep(forTimeInterval: 0.3)
+    logger2.log(Data("chunk\r\n".utf8), direction: .rx, format: .ascii, timestamps: false)
+    Thread.sleep(forTimeInterval: 0.5)
+    logger2.closeSession()
+    Thread.sleep(forTimeInterval: 0.3)
+    SessionLogger.maxFileBytes = prevCap
+
+    let files = try FileManager.default.contentsOfDirectory(atPath: dir.path)
+    let capFiles = files.filter { $0.hasPrefix("cap_test") }
+    check(capFiles.count >= 2, "超过大小上限自动切割", capFiles.joined())
+    let anyNote = capFiles.contains {
+        (try? String(contentsOf: dir.appendingPathComponent($0), encoding: .utf8))?.contains("自动切割") == true
+    }
+    check(anyNote, "切割文件 banner 含原因")
+    try? FileManager.default.removeItem(at: dir)
+} catch {
+    check(false, "计数重置与大小上限", error.localizedDescription)
+}
+
+print("== SessionLogger 选项变更标记 ==")
+do {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("CH9140SelfTest-\(UUID().uuidString)")
+    let logger = SessionLogger()
+    logger.openSession(directory: dir, deviceName: "T", header: "变更", mode: .perSession)
+    logger.log(Data("line1\r\n".utf8), direction: .rx, format: .ascii, timestamps: false)
+    logger.log(Data([0x01, 0x02]), direction: .rx, format: .hex, timestamps: false)   // 中途改格式
+    Thread.sleep(forTimeInterval: 0.6)
+    logger.closeSession()
+    Thread.sleep(forTimeInterval: 0.4)
+    let f = try FileManager.default.contentsOfDirectory(atPath: dir.path).first!
+    let text = try String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)
+    check(text.contains("日志选项变更"), "会话中途改格式留系统标记行")
+    check(text.contains("格式=十六进制"), "标记行含新格式")
+    try? FileManager.default.removeItem(at: dir)
+} catch {
+    check(false, "选项变更标记", error.localizedDescription)
+}
+
+print("== SessionLogger GBK 开关切换半字吐出 ==")
+do {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("CH9140SelfTest-\(UUID().uuidString)")
+    let logger = SessionLogger()
+    logger.openSession(directory: dir, deviceName: "T", header: "半字", mode: .perSession)
+    logger.log(Data([0xD6]), direction: .rx, format: .ascii, timestamps: false, decodeGBK: true)   // GBK 孤立前导进暂存
+    logger.log(Data("OK\r\n".utf8), direction: .rx, format: .ascii, timestamps: false, decodeGBK: false) // 开关关闭
+    Thread.sleep(forTimeInterval: 0.6)
+    logger.closeSession()
+    Thread.sleep(forTimeInterval: 0.4)
+    let f = try FileManager.default.contentsOfDirectory(atPath: dir.path).first!
+    let text = try String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)
+    check(text.contains("\u{FFFD}OK"), "转码关闭时残留半字立即以 U+FFFD 吐出(不滞留到收尾)")
+    try? FileManager.default.removeItem(at: dir)
+} catch {
+    check(false, "GBK 开关切换半字吐出", error.localizedDescription)
+}
+
+print("== SessionLogger 同步收尾 ==")
+do {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("CH9140SelfTest-\(UUID().uuidString)")
+    let logger = SessionLogger()
+    logger.openSession(directory: dir, deviceName: "T", header: "同步收尾", mode: .perSession)
+    logger.log(Data("Ruijie> ".utf8), direction: .rx, format: .ascii, timestamps: true)   // 开放行滞留缓冲
+    logger.closeSessionSync()   // 返回即应已落盘(不 sleep)
+    let f = try FileManager.default.contentsOfDirectory(atPath: dir.path).first!
+    let text = try String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)
+    check(text.contains("Ruijie>") && text.contains("⏎"), "同步收尾冲刷开放行")
+    check(text.contains("会话结束"), "同步收尾写 footer")
+    try? FileManager.default.removeItem(at: dir)
+} catch {
+    check(false, "同步收尾", error.localizedDescription)
+}
+
+print("== SessionLogger U+FFFD 追加不覆盖 ==")
+do {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("CH9140SelfTest-\(UUID().uuidString)")
+    let logger = SessionLogger()
+    logger.openSession(directory: dir, deviceName: "T", header: "追加", mode: .perSession)
+    // CR apply 模式: "abcdef\r" 后 cursor 回到行首; 再暂存一个 GBK 半字, 收尾时注入 U+FFFD
+    logger.log(Data("abcdef\r".utf8), direction: .rx, format: .ascii, timestamps: false,
+               decodeGBK: true, cr: .apply)
+    logger.log(Data([0xD6]), direction: .rx, format: .ascii, timestamps: false,
+               decodeGBK: true, cr: .apply)
+    Thread.sleep(forTimeInterval: 0.6)
+    logger.closeSession()
+    Thread.sleep(forTimeInterval: 0.4)
+    let f = try FileManager.default.contentsOfDirectory(atPath: dir.path).first!
+    let text = try String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)
+    check(text.contains("abcdef\u{FFFD}"), "U+FFFD 追加在行尾不覆盖已有内容")
+    try? FileManager.default.removeItem(at: dir)
+} catch {
+    check(false, "U+FFFD 追加不覆盖", error.localizedDescription)
+}
+
+print("== SessionLogger banner 图例与 locale ==")
+do {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("CH9140SelfTest-\(UUID().uuidString)")
+    let loggerHex = SessionLogger()
+    loggerHex.openSession(directory: dir, deviceName: "T", header: "图例",
+                          mode: .perSession, template: "legend_hex",
+                          format: .hex, timestamps: false)
+    Thread.sleep(forTimeInterval: 0.3)
+    loggerHex.closeSession()
+    Thread.sleep(forTimeInterval: 0.3)
+    let hexText = try String(contentsOf: dir.appendingPathComponent("legend_hex.log"), encoding: .utf8)
+    check(hexText.contains("格式: 十六进制"), "banner 图例按实际格式生成(HEX)")
+
+    let loggerRaw = SessionLogger()
+    loggerRaw.openSession(directory: dir, deviceName: "T", header: "图例",
+                          mode: .perSession, template: "legend_raw",
+                          format: .ascii, timestamps: false)
+    Thread.sleep(forTimeInterval: 0.3)
+    loggerRaw.closeSession()
+    Thread.sleep(forTimeInterval: 0.3)
+    let rawText = try String(contentsOf: dir.appendingPathComponent("legend_raw.log"), encoding: .utf8)
+    check(rawText.contains("纯文本原始流") && !rawText.contains("每行以 [时间] [方向] 开头"),
+          "无时间戳模式 banner 不再宣称每行有前缀")
+    check(SessionLogger.dayFormatter.locale?.identifier == "en_US_POSIX",
+          "固定格式 formatter 使用 POSIX locale")
+    try? FileManager.default.removeItem(at: dir)
+} catch {
+    check(false, "banner 图例与 locale", error.localizedDescription)
+}
+
 print("== 文件名模板解析 ==")
 do {
     let df = DateFormatter(); df.dateFormat = "yyyy-MM-dd HH:mm:ss"

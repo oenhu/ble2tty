@@ -5,6 +5,7 @@
 
 import Foundation
 import Combine
+import AppKit   // NSApplication.willTerminateNotification(进程退出日志收尾)
 
 public enum TerminalLineKind: Sendable, Equatable {
     case rx       // 芯片 -> 主机
@@ -126,12 +127,23 @@ public final class BridgeModel: ObservableObject {
     @Published public private(set) var activeModem: ModemLines?
 
     private var reconnectTarget: (uuid: UUID, name: String)?
+    /// 退出收尾观察者 token(deinit 时移除)
+    private var terminateObserver: NSObjectProtocol?
+
+    deinit {
+        if let t = terminateObserver { NotificationCenter.default.removeObserver(t) }
+    }
 
     public init() {
         rxAssembler.onBell = { [weak self] in self?.onBell?() }
         txAssembler.onBell = { [weak self] in self?.onBell?() }
         wireBLE()
         wirePort()
+        // 进程退出收尾: 同步冲刷日志开放行/半字暂存并写会话 footer, 落盘后再退出
+        terminateObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: nil) { [weak self] _ in
+            self?.logger.closeSessionSync()
+        }
         // 面板初始值 = 设置里的默认参数
         editBaudRate = settings.defaultBaudRate
         editDataBits = settings.defaultDataBits
@@ -157,6 +169,11 @@ public final class BridgeModel: ObservableObject {
         settings.$logRawEnabled.dropFirst().sink { [weak self] on in
             self?.logger.setRawEnabled(on)
         }.store(in: &cancellables)
+
+        // 日志打开/写盘失败上报(每会话一次): 让"取证日志没写成"立即可见
+        logger.onError = { [weak self] msg in
+            self?.appendSystem(msg)
+        }
 
         ble.onReceive = { [weak self] data in
             guard let self else { return }
@@ -345,8 +362,16 @@ public final class BridgeModel: ObservableObject {
                            mode: settings.logStorageMode,
                            template: settings.logNameTemplate,
                            customName: settings.logCustomName,
-                           rawEnabled: settings.logRawEnabled)
-        appendSystem("已开启新的日志会话")
+                           rawEnabled: settings.logRawEnabled,
+                           format: settings.logFormat,
+                           timestamps: settings.logTimestamps) { [weak self] url in
+            guard let self else { return }
+            if let url {
+                self.appendSystem("已开启新的日志会话 → \(url.lastPathComponent)")
+            } else {
+                self.appendSystem("日志开启失败: 无法写入 \(self.settings.logDirectoryPath), 请检查目录权限与磁盘空间")
+            }
+        }
     }
 
     /// 手动结束日志会话(连接保持, 数据停止写盘; 重连或「开始日志」可恢复)
