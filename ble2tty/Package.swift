@@ -2,11 +2,11 @@
 import PackageDescription
 
 let package = Package(
-    name: "CH9140Bridge",
+    name: "ble2tty",
     platforms: [.macOS(.v13)],
     products: [
         .library(name: "CH9140Core", targets: ["CH9140Core"]),
-        .executable(name: "CH9140Bridge", targets: ["CH9140Bridge"])
+        .executable(name: "BLE2TTY", targets: ["BLE2TTY"])
     ],
     dependencies: [
         .package(url: "https://github.com/migueldeicaza/SwiftTerm", from: "1.2.0")
@@ -17,12 +17,12 @@ let package = Package(
             path: "Sources/CH9140Core"
         ),
         .executableTarget(
-            name: "CH9140Bridge",
+            name: "BLE2TTY",
             dependencies: [
                 "CH9140Core",
                 .product(name: "SwiftTerm", package: "SwiftTerm")
             ],
-            path: "Sources/CH9140Bridge"
+            path: "Sources/BLE2TTY"
         ),
         .executableTarget(
             name: "CH9140SelfTest",

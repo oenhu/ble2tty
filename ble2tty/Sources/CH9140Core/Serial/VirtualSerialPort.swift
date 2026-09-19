@@ -77,7 +77,7 @@ public final class VirtualSerialPort: ObservableObject {
         let base = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first!
         return base
             .appendingPathComponent("Application Support", isDirectory: true)
-            .appendingPathComponent("CH9140Bridge", isDirectory: true)
+            .appendingPathComponent("BLE2TTY", isDirectory: true)
     }
 
     /// 无空格的兼容符号链接目录(minicom 等工具会把设备路径按空格分词)

@@ -26,7 +26,7 @@ struct ContentView: View {
             Divider()
             StatusBarView()
         }
-        .navigationTitle("CH9140 Bridge")
+        .navigationTitle("BLE2TTY")
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button {

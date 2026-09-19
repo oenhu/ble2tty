@@ -5,9 +5,9 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>zh_CN</string>
 	<key>CFBundleDisplayName</key>
-	<string>CH9140 Bridge</string>
+	<string>BLE2TTY</string>
 	<key>CFBundleExecutable</key>
-	<string>CH9140Bridge</string>
+	<string>BLE2TTY</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>CFBundleIdentifier</key>
@@ -15,11 +15,11 @@
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>CH9140Bridge</string>
+	<string>BLE2TTY</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.5</string>
+	<string>1.1.0</string>
 	<key>CFBundleVersion</key>
 	<string>5</string>
 	<key>LSMinimumSystemVersion</key>

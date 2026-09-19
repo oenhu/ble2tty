@@ -260,7 +260,7 @@ private struct PortSettingsTab: View {
             Section {
                 TextField("串口名称", text: $settings.portName)
                     .textFieldStyle(.roundedBorder)
-                Text("虚拟串口会创建两个符号链接:\n• ~/Library/Application Support/CH9140Bridge/cu.<名称>\n• ~/.ch9140/cu.<名称> (无空格, 兼容 minicom 等按空格分词的工具)\n在 screen / minicom / CoolTerm / PuTTY 中选择任一路径即可使用。")
+                Text("虚拟串口会创建两个符号链接:\n• ~/Library/Application Support/BLE2TTY/cu.<名称>\n• ~/.ch9140/cu.<名称> (无空格, 兼容 minicom 等按空格分词的工具)\n在 screen / minicom / CoolTerm / PuTTY 中选择任一路径即可使用。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Toggle("App 启动时自动创建虚拟串口", isOn: $settings.autoCreatePort)

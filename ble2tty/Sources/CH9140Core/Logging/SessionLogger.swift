@@ -290,7 +290,7 @@ public final class SessionLogger: ObservableObject {
             var bannerText = """
 
             ============================================================
-             CH9140 Bridge 会话日志
+             BLE2TTY 会话日志
              设备: \(deviceName ?? "未知")
              开始时间: \(Self.lineStampFormatter.string(from: now))
              \(header)

@@ -1,16 +1,16 @@
 //
-//  CH9140BridgeApp.swift
+//  BLE2TTYApp.swift
 //  CH9140 蓝牙串口桥 - macOS App 入口
 //
 
 import SwiftUI
 import CH9140Core
 
-struct CH9140BridgeApp: App {
+struct BLE2TTYApp: App {
     @StateObject private var model = BridgeModel()
 
     var body: some Scene {
-        WindowGroup("CH9140 Bridge") {
+        WindowGroup("BLE2TTY") {
             ContentView()
                 .environmentObject(model)
                 .environmentObject(model.ble)

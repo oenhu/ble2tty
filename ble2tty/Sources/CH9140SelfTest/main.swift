@@ -167,7 +167,7 @@ do {
           "日志文件创建", files.joined())
     if let f = files.first {
         let content = try String(contentsOf: dir.appendingPathComponent(f), encoding: .utf8)
-        check(content.contains("CH9140 Bridge 会话日志") && content.contains("[RX] enable")
+        check(content.contains("BLE2TTY 会话日志") && content.contains("[RX] enable")
               && content.contains("[TX] 01 02") && content.contains("会话结束"),
               "日志内容完整")
     }
@@ -214,7 +214,7 @@ do {
 
     let dailyFile = dir.appendingPathComponent("CH9140_CH9140BLE2U_\(day).log")
     if let content = try? String(contentsOf: dailyFile, encoding: .utf8) {
-        let bannerCount = content.components(separatedBy: "CH9140 Bridge 会话日志").count - 1
+        let bannerCount = content.components(separatedBy: "BLE2TTY 会话日志").count - 1
         check(bannerCount == 2 && content.contains("enable") && content.contains("show version"),
               "按日期合并文件追加两个会话", "会话数=\(bannerCount)")
     } else {
@@ -611,7 +611,7 @@ do {
     let files3 = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
     check(files3 == ["merged_\(day).log"], "追加模式切割不产生新文件", files3.joined())
     if let c = try? String(contentsOf: dir.appendingPathComponent("merged_\(day).log"), encoding: .utf8) {
-        let banners = c.components(separatedBy: "CH9140 Bridge 会话日志").count - 1
+        let banners = c.components(separatedBy: "BLE2TTY 会话日志").count - 1
         check(banners == 2 && c.contains("AAA") && c.contains("BBB"),
               "追加模式切割后同文件含两个会话头", " banners=\(banners)")
     }

@@ -7,4 +7,5 @@
 DerivedData/
 
 # 打包产物(build_app.sh 生成)
-CH9140Bridge/CH9140Bridge.app
+ble2tty/*.app
+ble2tty/*.zip

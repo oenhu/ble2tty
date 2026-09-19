@@ -1,4 +1,4 @@
-# CH9140Bridge — CH9140 蓝牙串口桥 (macOS)
+# BLE2TTY — CH9140 蓝牙串口桥 (macOS)
 
 把 **CH9140 蓝牙转串口芯片** 桥接成 Mac 上的**虚拟串口**, 配合原生 GUI 控制面板,
 用于调试交换机/路由器等网络设备的 Console 口, 兼容任意串口工具
@@ -14,27 +14,27 @@
 |---|---|
 | BLE 扫描/连接 | 自动过滤 CH9140 透传服务(0xFFF0), 可切换显示全部设备, 信号强度排序 |
 | 设备 MAC 识别 | 连接就绪时自动解析设备真实 MAC(每两位 `-` 分割, 如 `DC-04-5A-5E-12-5B`), 显示于 最近连接/发现设备/状态栏; CH9140 出厂同名, MAC 是区分不同芯片的稳定标识。CoreBluetooth 不提供 MAC, 经系统蓝牙报告查询并缓存到最近连接 |
-| 虚拟串口 | 基于 PTY 伪终端, 无需内核扩展; 路径 `~/Library/Application Support/CH9140Bridge/cu.CH9140` |
+| 虚拟串口 | 基于 PTY 伪终端, 无需内核扩展; 路径 `~/Library/Application Support/BLE2TTY/cu.CH9140` |
 | 波特率跟随 | 串口工具 `tcsetattr` 修改波特率/数据位/停止位/校验 → 自动经 0xFFF3 下发给芯片 |
 | 串口参数配置 | 面板直接下发 波特率(300~1M)/数据位/停止位/校验/流控/DTR/RTS, 芯片回包校验 |
 | MODEM 状态 | CTS/DSR/RI/DCD 实时指示灯(0x88 上报), 芯片发送缓冲区满/空流控 |
 | 默认保存日志 | 双份保存: raw 原始日志(全量原始字节含 CR/退格/ANSI/GBK, raw/ 子目录) + clean 日志(GBK 转码、ANSI/CR/退格过滤开关, 便于日常查看复制); 文件名模板({device}/{name}/{date}/{time}/{datetime}/{seq}); 一键切割; 按会话/按日期分目录/按日期合并三种方式, 跨午夜自动切换 |
 | 监视终端 | 收发监视(HEX/文本), 按行合并分包数据, 支持跨行复制; 整行发送(默认 CR 行尾, 带最近发送历史) + **交互模式**(键盘直连: Tab 补全/↑↓ 历史/Ctrl+C/Cmd+V 粘贴/退格编辑, 回显自动重绘) |
 | 终端仿真 | 完整终端仿真器(SwiftTerm): ANSI 转义解析, 5000 行回滚, 键盘直连; 输入区聚焦时自动切换英文输入法, 移开自动恢复(可关闭) |
-| 自动重连 | 意外断开或连接失败 2 秒后自动重连, 持续重试直到手动断开(可在设置关闭) |
+| 自动重连 | 意外断开或连接失败后自动重连: 指数退避(2s 起 30s 封顶, 不限次), 蓝牙关闭时挂起待恢复; 系统未缓存设备时自动转扫描查找(可在设置关闭) |
 
 ## 构建与运行
 
 ```bash
-cd CH9140Bridge
+cd ble2tty
 ./build_app.sh          # Release 构建 + 打包 + ad-hoc 签名
-open CH9140Bridge.app   # 运行
+open BLE2TTY.app        # 运行
 ```
 
 只需 Xcode Command Line Tools(无需完整 Xcode)。首次运行会弹蓝牙权限请求,
-或在 **系统设置 → 隐私与安全性 → 蓝牙** 中允许 CH9140Bridge。
+或在 **系统设置 → 隐私与安全性 → 蓝牙** 中允许 BLE2TTY。
 
-运行自检(105 项: 协议编解码/PTY 数据通路/日志/raw+clean 双份/行装配/设置/MAC 解析):
+运行自检(137 项: 协议编解码与帧拆分/PTY 数据通路/日志/raw+clean 双份/行装配与 OSC 过滤/设置/MAC 解析):
 
 ```bash
 swift run CH9140SelfTest
@@ -48,7 +48,7 @@ swift run CH9140SelfTest
 3. 用任意串口工具打开虚拟串口:
 
    ```bash
-   screen ~/Library/Application\ Support/CH9140Bridge/cu.CH9140 9600
+   screen ~/Library/Application\ Support/BLE2TTY/cu.CH9140 9600
    # 退出: Ctrl+A 然后 K
    ```
 
@@ -71,7 +71,7 @@ swift run CH9140SelfTest
 适合脚本化/远程会话(与 GUI 共用同一签名 Bundle, 继承蓝牙权限):
 
 ```bash
-CH9140Bridge.app/Contents/MacOS/CH9140Bridge --cli \
+BLE2TTY.app/Contents/MacOS/BLE2TTY --cli \
     --name CH9140BLE2U --baud 115200 --port-name CH9140 --timeout 45
 ```
 
@@ -81,18 +81,21 @@ CH9140Bridge.app/Contents/MacOS/CH9140Bridge --cli \
 | `--baud` | `115200` | 连接后下发给芯片的波特率(8N1 无流控) |
 | `--port-name` | `CH9140` | 虚拟串口名(构成 `cu.<名称>`) |
 | `--timeout` | `45` | 扫描/连接总超时(秒) |
+| `--uuid` | 无 | 多块同名芯片同场时按 CoreBluetooth UUID 直连(跳过扫描按名匹配) |
 
 通道就绪后打印 `CLI_READY port=… compat=…`(供脚本解析), 之后每 10 秒打印
-一次双向字节统计。退出码: `2` 连接失败或超时, `3` 创建虚拟串口失败,
-`4` 就绪后连接断开(清理符号链接后退出)。CLI 不做自动重连。
+一次双向字节统计。退出码: `0` 收到 SIGTERM 正常退出, `2` 连接失败或超时,
+`3` 创建虚拟串口失败, `4` 就绪后连接断开(清理符号链接后退出), `130` 收到 SIGINT。
+就绪前的连接失败会在超时预算内自动重试; 就绪后断开不做重连。
+SIGINT/SIGTERM 均会清理虚拟串口符号链接后再退出。
 
 ## 技术说明
 
 ```
 串口工具 ──/dev/ttysNNN──┐
                          │ openpty()        BLE GATT
-CH9140Bridge App ── master fd ──────────► 0xFFF2 (WriteWithoutResponse)
-CH9140Bridge App ◄─ master fd ◄────────── 0xFFF1 (Notify)
+BLE2TTY App ─────── master fd ──────────► 0xFFF2 (WriteWithoutResponse)
+BLE2TTY App ◄─────── master fd ◄────────── 0xFFF1 (Notify)
                      tcsetattr 巡检 ─────► 0xFFF3 (0x06 配置串口 / 0x07 流控)
                      MODEM 状态  ◄──────── 0xFFF3 (0x88 上报)
 ```
@@ -105,7 +108,7 @@ CH9140Bridge App ◄─ master fd ◄────────── 0xFFF1 (Noti
 ## 目录结构
 
 ```
-CH9140Bridge/
+ble2tty/
 ├── Package.swift
 ├── build_app.sh                 # 一键构建 .app
 ├── Resources/Info.plist         # 含蓝牙权限说明
@@ -117,9 +120,9 @@ CH9140Bridge/
 │   │   ├── Logging/             #   会话日志
 │   │   ├── Settings/            #   UserDefaults 设置
 │   │   └── BridgeModel.swift    #   粘合层
-│   ├── CH9140Bridge/            # SwiftUI App(界面 + --cli 无界面入口)
-│   └── CH9140SelfTest/          # 自检程序(69 项断言)
-└── CH9140Bridge.app             # 构建产物
+│   ├── BLE2TTY/                 # SwiftUI App(界面 + --cli 无界面入口)
+│   └── CH9140SelfTest/          # 自检程序(137 项断言)
+└── BLE2TTY.app                  # 构建产物
 ```
 
 ## 故障排查
@@ -133,11 +136,12 @@ CH9140Bridge/
 | 连接按钮永久卡灰 | 设备无响应后无法再次连接, 只能重启 App | v1.0.3 | [BUGFIX-2026-09-12-ConnectButtonStuck.md](docs/BUGFIX-2026-09-12-ConnectButtonStuck.md) |
 | 扫描列表后台线程发布/发送队列无上限/转连不断旧连接 | UI 未定义行为、内存增长、多设备数据串流 | v1.0.4 | [BUGFIX-2026-09-12-ThreeAuditIssues.md](docs/BUGFIX-2026-09-12-ThreeAuditIssues.md) |
 | 自动重连失效/陈旧数据复活/跨线程状态竞争/断开重复事件等 | 连接失败后不重连、断连期间积压数据发给新设备等 | v1.0.5 | [BUGFIX-2026-09-13-CodeAudit.md](docs/BUGFIX-2026-09-13-CodeAudit.md) |
+| 重连静默终止/蓝牙关闭状态不落定/芯片满上报丢失 TX 停摆/MAC 解析管道死锁/fd 复用竞争等 | 桥接无声失效、边缘场景卡死 | v1.1.0 | [BUGFIX-2026-09-19-ReviewFixes.md](docs/BUGFIX-2026-09-19-ReviewFixes.md) |
 
 ### 常见问题
 
 **Q: 虚拟串口路径在哪里？**  
-A: 两个符号链接任选其一: `~/Library/Application Support/CH9140Bridge/cu.CH9140`
+A: 两个符号链接任选其一: `~/Library/Application Support/BLE2TTY/cu.CH9140`
 和 `~/.ch9140/cu.CH9140`(名称均可在设置中改)。后者路径无空格, 专为 minicom 等
 按空格分词设备路径的工具准备。
 
@@ -151,7 +155,7 @@ A: macOS PTY 的 termios 标准波特率上限为 230400, 超限的设定无法�
    (或 CLI `--baud`)下发给芯片。
 
 **Q: 串口工具提示"Permission denied"？**  
-A: 检查系统设置 → 隐私与安全性 → 蓝牙，确保 CH9140Bridge 已授权
+A: 检查系统设置 → 隐私与安全性 → 蓝牙，确保 BLE2TTY 已授权
 
 **Q: 连接后没有数据？**  
 A: 检查 CH9140 模块与目标设备的串口连线，确认波特率一致
