@@ -4,7 +4,7 @@
 用于调试交换机/路由器等网络设备的 Console 口, 兼容任意串口工具
 (screen / minicom / CoolTerm / PuTTY / SecureCRT 等)。
 
-协议实现对照 WCH 官方资料(见 `../doc`):
+协议实现对照 WCH 官方资料(版权属 WCH 沁恒, 不随本仓库分发, 请从 [WCH 官网](https://www.wch.cn) 下载):
 - `BleUartLib/iOS` CH9140Lib 官方 iOS 库(连接/配置逻辑逐字节对齐)
 - `CH9140DS1.PDF` 芯片数据手册(FFF0-FFF3 GATT 通道定义)
 

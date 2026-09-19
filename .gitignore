@@ -9,3 +9,6 @@ DerivedData/
 # 打包产物(build_app.sh 生成)
 ble2tty/*.app
 ble2tty/*.zip
+
+# 厂商资料(WCH 数据手册/官方 SDK, 版权属 WCH): 保留本地参考, 不进仓库
+doc/
