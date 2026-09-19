@@ -132,12 +132,12 @@ ble2tty/
 
 | 问题 | 症状 | 修复版本 | 详细文档 |
 |------|------|----------|----------|
-| CPU 占用过高 (156%) | 电脑发热、风扇狂转 | v1.0.1 | [BUGFIX-2026-09-10-HighCPU.md](docs/BUGFIX-2026-09-10-HighCPU.md) |
-| UI 渲染/状态栏刷新开销 | 大数据量时界面卡顿 | v1.0.2 | [PERF-2026-09-10-UIRenderingAndThrottling.md](docs/PERF-2026-09-10-UIRenderingAndThrottling.md) |
-| 连接按钮永久卡灰 | 设备无响应后无法再次连接, 只能重启 App | v1.0.3 | [BUGFIX-2026-09-12-ConnectButtonStuck.md](docs/BUGFIX-2026-09-12-ConnectButtonStuck.md) |
-| 扫描列表后台线程发布/发送队列无上限/转连不断旧连接 | UI 未定义行为、内存增长、多设备数据串流 | v1.0.4 | [BUGFIX-2026-09-12-ThreeAuditIssues.md](docs/BUGFIX-2026-09-12-ThreeAuditIssues.md) |
-| 自动重连失效/陈旧数据复活/跨线程状态竞争/断开重复事件等 | 连接失败后不重连、断连期间积压数据发给新设备等 | v1.0.5 | [BUGFIX-2026-09-13-CodeAudit.md](docs/BUGFIX-2026-09-13-CodeAudit.md) |
-| 重连静默终止/蓝牙关闭状态不落定/芯片满上报丢失 TX 停摆/MAC 解析管道死锁/fd 复用竞争等 | 桥接无声失效、边缘场景卡死 | v1.1.0 | [BUGFIX-2026-09-19-ReviewFixes.md](docs/BUGFIX-2026-09-19-ReviewFixes.md) |
+| CPU 占用过高 (156%) | 电脑发热、风扇狂转 | v1.0.1 | [BUGFIX-2026-09-10-HighCPU.md](ble2tty/docs/BUGFIX-2026-09-10-HighCPU.md) |
+| UI 渲染/状态栏刷新开销 | 大数据量时界面卡顿 | v1.0.2 | [PERF-2026-09-10-UIRenderingAndThrottling.md](ble2tty/docs/PERF-2026-09-10-UIRenderingAndThrottling.md) |
+| 连接按钮永久卡灰 | 设备无响应后无法再次连接, 只能重启 App | v1.0.3 | [BUGFIX-2026-09-12-ConnectButtonStuck.md](ble2tty/docs/BUGFIX-2026-09-12-ConnectButtonStuck.md) |
+| 扫描列表后台线程发布/发送队列无上限/转连不断旧连接 | UI 未定义行为、内存增长、多设备数据串流 | v1.0.4 | [BUGFIX-2026-09-12-ThreeAuditIssues.md](ble2tty/docs/BUGFIX-2026-09-12-ThreeAuditIssues.md) |
+| 自动重连失效/陈旧数据复活/跨线程状态竞争/断开重复事件等 | 连接失败后不重连、断连期间积压数据发给新设备等 | v1.0.5 | [BUGFIX-2026-09-13-CodeAudit.md](ble2tty/docs/BUGFIX-2026-09-13-CodeAudit.md) |
+| 重连静默终止/蓝牙关闭状态不落定/芯片满上报丢失 TX 停摆/MAC 解析管道死锁/fd 复用竞争等 | 桥接无声失效、边缘场景卡死 | v1.1.0 | [BUGFIX-2026-09-19-ReviewFixes.md](ble2tty/docs/BUGFIX-2026-09-19-ReviewFixes.md) |
 
 ### 常见问题
 
@@ -162,4 +162,4 @@ A: 检查系统设置 → 隐私与安全性 → 蓝牙，确保 BLE2TTY 已授�
 A: 检查 CH9140 模块与目标设备的串口连线，确认波特率一致
 
 **Q: CPU 占用很高？**  
-A: v1.0.0 存在此问题，请升级到 v1.0.1+。详见 [BUGFIX 文档](docs/BUGFIX-2026-09-10-HighCPU.md)
+A: v1.0.0 存在此问题，请升级到 v1.0.1+。详见 [BUGFIX 文档](ble2tty/docs/BUGFIX-2026-09-10-HighCPU.md)
