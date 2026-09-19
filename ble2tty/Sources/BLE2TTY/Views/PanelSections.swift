@@ -198,7 +198,7 @@ struct LoggingSectionView: View {
                             .help("收尾并关闭当前日志文件; 连接保持, 数据停止写盘")
                     } else {
                         Button("开始日志") { model.startLog() }
-                            .disabled(!settings.logEnabled || !ble.isReady)
+                            .disabled(!settings.logEnabled || !model.isLinkReady)
                             .help(startLogHelp)
                     }
                 }
@@ -234,14 +234,14 @@ struct LoggingSectionView: View {
     /// 无日志文件时的提示文案(区分未开启/未连接/已手动结束)
     private var logIdleHint: String {
         if !settings.logEnabled { return "可在 设置 > 日志 中开启" }
-        if !ble.isReady { return "连接设备后自动创建日志文件" }
+        if !model.isLinkReady { return "连接设备后自动创建日志文件" }
         return "日志已结束, 点击下方「开始日志」恢复记录"
     }
 
     /// 「开始日志」按钮的提示(含不可用原因)
     private var startLogHelp: String {
         if !settings.logEnabled { return "需先在 设置 > 日志 中开启「默认保存日志」" }
-        if !ble.isReady { return "连接设备后才能开始记录" }
+        if !model.isLinkReady { return "连接设备后才能开始记录" }
         return "按当前模板开启新日志文件, 恢复记录(重名自动避让)"
     }
 }

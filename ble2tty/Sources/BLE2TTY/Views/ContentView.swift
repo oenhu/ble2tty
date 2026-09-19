@@ -56,8 +56,8 @@ struct StatusBarView: View {
                 Text(connectionText)
             }
             separator
-            // 连接质量: 实时 RSSI + 评级 + 连接时长
-            if ble.connectionState == .ready {
+            // 连接质量: 实时 RSSI + 评级 + 连接时长(仅 BLE 链路)
+            if model.activeLinkKind == .ble, ble.connectionState == .ready {
                 separator
                 HStack(spacing: 5) {
                     Image(systemName: "cellularbars")
@@ -109,7 +109,7 @@ struct StatusBarView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            if ble.chipBufferFull {
+            if model.activeLinkKind == .ble, ble.chipBufferFull {
                 separator
                 Label("芯片缓冲满", systemImage: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
@@ -117,7 +117,7 @@ struct StatusBarView: View {
             Spacer()
             Text("RX \(Self.formatBytes(model.totalRXBytes))  TX \(Self.formatBytes(model.totalTXBytes))")
                 .foregroundStyle(.secondary)
-                .help("本次连接芯片收发的全部字节(含内置终端与虚拟串口)")
+                .help("本次连接收发的全部字节(含内置终端与虚拟串口)")
         }
         .font(.caption)
         .padding(.horizontal, 12)
@@ -130,7 +130,7 @@ struct StatusBarView: View {
     }
 
     private var connectionColor: Color {
-        switch ble.connectionState {
+        switch model.activeConnectionState {
         case .ready: return .green
         case .connecting, .discovering: return .orange
         case .failed: return .red
@@ -139,8 +139,11 @@ struct StatusBarView: View {
     }
 
     private var connectionText: String {
-        switch ble.connectionState {
+        switch model.activeConnectionState {
         case .ready:
+            if model.activeLinkKind == .wired {
+                return "有线 · \(model.wired.connectedPortName)"
+            }
             let name = ble.connectedDeviceName
             // 已连接设备附上真实 MAC(来自连接就绪时的系统解析缓存)
             if let uuid = ble.connectedUUID,

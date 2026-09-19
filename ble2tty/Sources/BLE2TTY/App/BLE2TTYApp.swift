@@ -14,6 +14,7 @@ struct BLE2TTYApp: App {
             ContentView()
                 .environmentObject(model)
                 .environmentObject(model.ble)
+                .environmentObject(model.wired)
                 .environmentObject(model.port)
                 .environmentObject(model.logger)
                 .environmentObject(model.settings)
@@ -28,9 +29,9 @@ struct BLE2TTYApp: App {
                 Button(model.ble.isScanning ? "停止扫描" : "开始扫描") { model.toggleScan() }
                     .keyboardShortcut("s", modifiers: [.command])
                 Divider()
-                Button("应用串口参数到芯片") { model.applySerialParameters() }
+                Button("应用串口参数") { model.applySerialParameters() }
                     .keyboardShortcut(.return, modifiers: [.command, .shift])
-                    .disabled(!model.ble.isReady)
+                    .disabled(!model.isLinkReady)
             }
             CommandMenu("日志") {
                 Button("截断并新建日志文件") { model.rotateLog() }

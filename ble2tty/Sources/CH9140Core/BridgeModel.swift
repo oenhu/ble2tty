@@ -39,9 +39,34 @@ public struct TerminalLine: Identifiable, Sendable {
 public final class BridgeModel: ObservableObject {
 
     public let ble = BLEManager()
+    public let wired = WiredSerialPort()
     public let port = VirtualSerialPort()
     public let logger = SessionLogger()
     public let settings = SettingsStore()
+
+    /// 链路种类: BLE(CH9140) 或 有线串口
+    public enum LinkKind: String, Sendable { case ble, wired }
+    /// 设备列表页正在查看的源(可与活动连接不同)
+    @Published public var listSource: LinkKind = .ble
+    /// 当前活动连接所属的链路
+    @Published public private(set) var activeLinkKind: LinkKind = .ble
+    /// 枚举到的有线串口(有线页展示)
+    @Published public private(set) var wiredPorts: [SerialPortInfo] = []
+    /// 有线连接时使用的参数(自动重连时恢复同一会话参数)
+    private var lastWiredParams: (params: SerialParameters, flowControl: Bool)?
+
+    /// 活动链路是否就绪(发送区/参数面板的总开关)
+    public var isLinkReady: Bool {
+        activeLinkKind == .ble ? ble.isReady : wired.isReady
+    }
+    /// 活动链路的连接状态(状态栏指示)
+    public var activeConnectionState: BLEConnectionState {
+        activeLinkKind == .ble ? ble.connectionState : wired.connectionState
+    }
+    /// 活动链路的对端名称
+    public var activeConnectionName: String {
+        activeLinkKind == .ble ? ble.connectedDeviceName : wired.connectedPortName
+    }
 
     // MARK: 全链路字节统计(状态栏)
     @Published public private(set) var totalRXBytes: UInt64 = 0
@@ -127,7 +152,8 @@ public final class BridgeModel: ObservableObject {
     @Published public private(set) var activeSerial: SerialParameters?
     @Published public private(set) var activeModem: ModemLines?
 
-    private var reconnectTarget: (uuid: UUID, name: String)?
+    /// 自动重连目标: BLE 按 UUID, 有线按设备路径
+    private var reconnectTarget: (kind: LinkKind, uuid: UUID?, path: String?, name: String)?
     /// 退出收尾观察者 token(deinit 时移除)
     private var terminateObserver: NSObjectProtocol?
 
@@ -139,11 +165,17 @@ public final class BridgeModel: ObservableObject {
         rxAssembler.onBell = { [weak self] in self?.onBell?() }
         txAssembler.onBell = { [weak self] in self?.onBell?() }
         wireBLE()
+        wireWired()
         wirePort()
+        // 有线链路的状态变化经 model 转发, 视图观察 model 即可联动(isLinkReady 等计算属性)
+        wired.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }.store(in: &cancellables)
         // 进程退出收尾: 同步冲刷日志开放行/半字暂存并写会话 footer, 落盘后再退出
         terminateObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: nil) { [weak self] _ in
             self?.port.close()              // 清理 cu.* 符号链接与 PTY, 退出不残留
+            self?.wired.disconnect()        // 释放有线串口独占
             self?.logger.closeSessionSync()
         }
         // 面板初始值 = 设置里的默认参数
@@ -178,20 +210,7 @@ public final class BridgeModel: ObservableObject {
         }
 
         ble.onReceive = { [weak self] data in
-            guard let self else { return }
-            self.addBytes(rx: UInt64(data.count))
-            self.port.writeToPort(data)
-            if self.settings.logEnabled {
-                self.logger.log(data, direction: .rx,
-                                format: self.settings.logFormat,
-                                timestamps: self.settings.logTimestamps,
-                                decodeGBK: self.settings.logGBKCompatible,
-                                stripANSI: self.settings.logCleanStripANSI,
-                                cr: self.settings.logCleanCRMode,
-                                bs: self.settings.logCleanBSMode)
-            }
-            self.appendStreamChunk(data, kind: .rx)
-            self.onRawRX?(data)
+            self?.handleInboundData(data)
         }
 
         ble.onLog = { [weak self] msg in
@@ -206,7 +225,7 @@ public final class BridgeModel: ObservableObject {
         }.store(in: &cancellables)
 
         ble.onConnectionChange = { [weak self] state in
-            guard let self else { return }
+            guard let self, self.activeLinkKind == .ble else { return }
             switch state {
             case .ready:
                 self.reconnectAttempt = 0
@@ -239,6 +258,61 @@ public final class BridgeModel: ObservableObject {
         }
     }
 
+    /// BLE / 有线共用的接收处理: 字节统计 / 转发虚拟串口 / 日志 / 终端显示 / 原始旁路
+    private func handleInboundData(_ data: Data) {
+        addBytes(rx: UInt64(data.count))
+        port.writeToPort(data)
+        if settings.logEnabled {
+            logger.log(data, direction: .rx,
+                        format: settings.logFormat,
+                        timestamps: settings.logTimestamps,
+                        decodeGBK: settings.logGBKCompatible,
+                        stripANSI: settings.logCleanStripANSI,
+                        cr: settings.logCleanCRMode,
+                        bs: settings.logCleanBSMode)
+        }
+        appendStreamChunk(data, kind: .rx)
+        onRawRX?(data)
+    }
+
+    // MARK: - 有线串口事件接线
+
+    private func wireWired() {
+        wired.onReceive = { [weak self] data in
+            self?.handleInboundData(data)
+        }
+        wired.onLog = { [weak self] msg in
+            self?.appendSystem(msg)
+        }
+        wired.onConnectionChange = { [weak self] state in
+            guard let self, self.activeLinkKind == .wired else { return }
+            switch state {
+            case .ready:
+                self.reconnectAttempt = 0
+                self.reconnectPendingBT = false
+                self.resetByteCounters()
+                if self.settings.logEnabled { self.startLog() }
+                // 与 BLE 一致: 就绪后按需下发 MODEM/流控(打开时串口参数已随 open 设置)
+                if self.settings.applyDefaultsOnConnect {
+                    self.applyModemLines()
+                }
+            case .disconnected, .failed:
+                self.logger.closeSession()
+                self.scheduleReconnect()
+            default:
+                break
+            }
+        }
+    }
+
+    /// 枚举有线串口(后台执行, 结果发布到 wiredPorts)
+    public func refreshWiredPorts() {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let ports = SerialPortEnumerator.listPorts()
+            DispatchQueue.main.async { self.wiredPorts = ports }
+        }
+    }
+
     // MARK: - 自动重连
 
     /// 已尝试次数(连接就绪/用户手动操作时清零)
@@ -267,7 +341,17 @@ public final class BridgeModel: ObservableObject {
                 self.reconnectPendingBT = true
                 return
             }
-            self.ble.connect(uuid: target.uuid, name: target.name)
+            switch target.kind {
+            case .ble:
+                guard let uuid = target.uuid else { return }
+                self.ble.connect(uuid: uuid, name: target.name)
+            case .wired:
+                guard let path = target.path else { return }
+                let lp = self.lastWiredParams
+                    ?? (self.settings.defaultSerialParameters, self.settings.defaultFlowControl)
+                self.wired.connect(path: path, name: target.name,
+                                   params: lp.params, flowControl: lp.flowControl)
+            }
         }
     }
 
@@ -277,7 +361,7 @@ public final class BridgeModel: ObservableObject {
         port.onDataFromPort = { [weak self] data in
             guard let self else { return }
             self.addBytes(tx: UInt64(data.count))
-            self.ble.send(data)
+            self.sendToActiveLink(data)
             DispatchQueue.main.async {
                 // raw 永远全量含 TX; logSentData 只决定 clean 是否包含
                 if self.settings.logEnabled, self.settings.logSentData || self.settings.logRawEnabled {
@@ -301,7 +385,7 @@ public final class BridgeModel: ObservableObject {
                 self.editDataBits = params.dataBits
                 self.editStopBits = params.stopBits
                 self.editParity   = params.parity
-                guard self.settings.followVirtualPortBaud, self.ble.isReady else { return }
+                guard self.settings.followVirtualPortBaud, self.isLinkReady else { return }
                 self.applySerialParameters()
             }
         }
@@ -319,7 +403,9 @@ public final class BridgeModel: ObservableObject {
     }
 
     public func connect(_ device: DiscoveredDevice) {
-        reconnectTarget = (device.id, device.name)
+        wired.disconnect()   // 同一时刻只允许一条活动链路
+        activeLinkKind = .ble
+        reconnectTarget = (.ble, device.id, nil, device.name)
         reconnectAttempt = 0
         reconnectPendingBT = false
         ble.connect(device)
@@ -327,17 +413,36 @@ public final class BridgeModel: ObservableObject {
 
     /// 连接"最近连接"列表里的设备(无需先扫描)
     public func connectRecent(_ device: RecentDevice) {
-        reconnectTarget = (device.uuid, device.name)
+        wired.disconnect()   // 同一时刻只允许一条活动链路
+        activeLinkKind = .ble
+        reconnectTarget = (.ble, device.uuid, nil, device.name)
         reconnectAttempt = 0
         reconnectPendingBT = false
         ble.connect(uuid: device.uuid, name: device.name)
+    }
+
+    /// 连接有线串口(IOKit 枚举到的设备)
+    public func connectWired(_ info: SerialPortInfo) {
+        ble.disconnect()   // 同一时刻只允许一条活动链路
+        activeLinkKind = .wired
+        reconnectTarget = (.wired, nil, info.path, info.name)
+        reconnectAttempt = 0
+        reconnectPendingBT = false
+        let params = SerialParameters(baudRate: editBaudRate, dataBits: editDataBits,
+                                      stopBits: editStopBits, parity: editParity)
+        lastWiredParams = (params, editFlowControl)
+        wired.connect(path: info.path, name: info.name,
+                      params: params, flowControl: editFlowControl)
     }
 
     public func disconnect() {
         reconnectTarget = nil
         reconnectAttempt = 0
         reconnectPendingBT = false
-        ble.disconnect()
+        switch activeLinkKind {
+        case .ble:   ble.disconnect()
+        case .wired: wired.disconnect()
+        }
     }
 
     // MARK: - 参数下发
@@ -346,20 +451,28 @@ public final class BridgeModel: ObservableObject {
         let params = SerialParameters(baudRate: editBaudRate, dataBits: editDataBits,
                                       stopBits: editStopBits, parity: editParity)
         applyingConfig = true
-        ble.applySerialParameters(params) { [weak self] ok, info in
+        let done: (Bool, String) -> Void = { [weak self] ok, info in
             guard let self else { return }
             self.applyingConfig = false
             if ok { self.activeSerial = params }
             self.appendSystem(info)
         }
+        switch activeLinkKind {
+        case .ble:   ble.applySerialParameters(params, completion: done)
+        case .wired: wired.applySerialParameters(params, completion: done)
+        }
     }
 
     public func applyModemLines() {
         let lines = ModemLines(flowControl: editFlowControl, dtr: editDTR, rts: editRTS)
-        ble.applyModemLines(lines) { [weak self] ok, info in
+        let done: (Bool, String) -> Void = { [weak self] ok, info in
             guard let self else { return }
             if ok { self.activeModem = lines }
             self.appendSystem(info)
+        }
+        switch activeLinkKind {
+        case .ble:   ble.applyModemLines(lines, completion: done)
+        case .wired: wired.applyModemLines(lines, completion: done)
         }
     }
 
@@ -381,7 +494,7 @@ public final class BridgeModel: ObservableObject {
 
     /// 手动开启日志会话(「结束日志」后恢复记录; 重名按规则自动避让, 不覆盖旧文件)
     public func startLog() {
-        guard ble.isReady else {
+        guard isLinkReady else {
             appendSystem("未连接设备, 无法开始日志")
             return
         }
@@ -416,12 +529,20 @@ public final class BridgeModel: ObservableObject {
         appendSystem("日志会话已结束, 可在日志面板点击「开始日志」恢复记录")
     }
 
+    /// 向活动链路发送(BLE 或 有线)
+    private func sendToActiveLink(_ data: Data) {
+        switch activeLinkKind {
+        case .ble:   ble.send(data)
+        case .wired: wired.send(data)
+        }
+    }
+
     // MARK: - 终端直接发送(内置控制台)
 
     public func sendFromTerminal(_ data: Data) {
-        guard !data.isEmpty, ble.isReady else { return }
+        guard !data.isEmpty, isLinkReady else { return }
         addBytes(tx: UInt64(data.count))
-        ble.send(data)
+        sendToActiveLink(data)
         if settings.logEnabled, settings.logSentData || settings.logRawEnabled {
             logger.log(data, direction: .tx, format: settings.logFormat, timestamps: settings.logTimestamps,
                        decodeGBK: settings.logGBKCompatible,
@@ -435,9 +556,9 @@ public final class BridgeModel: ObservableObject {
 
     /// 键盘直连(交互)模式: 按键字节立即发送, 不显示 TX 行(交换机回显即视觉反馈)
     public func sendInteractive(_ data: Data) {
-        guard !data.isEmpty, ble.isReady else { return }
+        guard !data.isEmpty, isLinkReady else { return }
         addBytes(tx: UInt64(data.count))
-        ble.send(data)
+        sendToActiveLink(data)
         if settings.logEnabled, settings.logSentData || settings.logRawEnabled {
             logger.log(data, direction: .tx, format: settings.logFormat, timestamps: settings.logTimestamps,
                        decodeGBK: settings.logGBKCompatible,

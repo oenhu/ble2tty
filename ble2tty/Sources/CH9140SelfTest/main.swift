@@ -910,6 +910,101 @@ do {
     check(p4.count == 1 && !r4.isEmpty, "坏帧跳过, 后续好帧解出", "packets=\(p4.count)")
 }
 
+print("== WiredSerialPort (PTY 对模拟有线串口) ==")
+do {
+    // 造一对伪终端: 从端当"有线串口设备"(有线实现不区分 PTY 与真实适配器)
+    var master: Int32 = -1, slave: Int32 = -1
+    var nameBuf = [CChar](repeating: 0, count: 128)
+    check(openpty(&master, &slave, &nameBuf, nil, nil) == 0, "openpty 造设备对")
+    let slavePath = String(cString: nameBuf)
+    // 探测 fd: 独占模式不影响已打开的 fd, 用于 termios 读回校验
+    let probe = Darwin.open(slavePath, O_RDWR | O_NOCTTY | O_NONBLOCK)
+    check(probe >= 0, "打开探测 fd")
+
+    let wired = WiredSerialPort()
+    var rxData = Data()
+    wired.onReceive = { d in rxData.append(d) }
+
+    wired.connect(path: slavePath, name: "SelfTestUART",
+                  params: SerialParameters(baudRate: 9600, dataBits: 8, stopBits: 1, parity: 0),
+                  flowControl: false)
+    check(waitMain { wired.connectionState == .ready }, "打开串口就绪")
+
+    // 设备 -> 主机
+    let hello = Data("HELLO-UART".utf8)
+    _ = hello.withUnsafeBytes { Darwin.write(master, $0.baseAddress!, hello.count) }
+    check(waitMain { rxData == hello }, "设备 -> 主机接收", String(decoding: rxData, as: UTF8.self))
+
+    // 主机 -> 设备
+    var got = Data()
+    let semTX = DispatchSemaphore(value: 0)
+    DispatchQueue.global().async {
+        var buf = [UInt8](repeating: 0, count: 64)
+        let n = Darwin.read(master, &buf, buf.count)
+        if n > 0 { got = Data(buf[0..<n]) }
+        semTX.signal()
+    }
+    wired.send(Data("PING".utf8))
+    check(semTX.wait(timeout: .now() + 3) == .success && got == Data("PING".utf8),
+          "主机 -> 设备发送", String(decoding: got, as: UTF8.self))
+
+    // 参数应用: 回调成功 + activeParams 更新 + termios 读回一致
+    // (完成回调在主线程派发, 用 waitMain 边跑 RunLoop 边等, 不能裸等信号量)
+    var applyOK: Bool? = nil
+    wired.applySerialParameters(SerialParameters(baudRate: 38400, dataBits: 8, stopBits: 1, parity: 0)) { ok, _ in
+        applyOK = ok
+    }
+    check(waitMain { applyOK != nil } && applyOK == true, "应用串口参数 38400")
+    check(waitMain { wired.activeParams?.baudRate == 38400 }, "activeParams 更新")
+    var tio = termios()
+    tcgetattr(probe, &tio)
+    check(cfgetispeed(&tio) == speed_t(B38400), "termios 读回波特率 38400")
+
+    // Mark/Space 校验: macOS 不支持, 应优雅失败(不崩溃不改参数)
+    var markOK: Bool? = nil
+    wired.applySerialParameters(SerialParameters(baudRate: 38400, dataBits: 8, stopBits: 1, parity: 3)) { ok, _ in
+        markOK = ok
+    }
+    check(waitMain { markOK != nil } && markOK == false, "Mark 校验优雅拒绝(macOS 不支持)")
+
+    // 流控开启: CRTSCTS 标志写入 termios(PTY 也支持); DTR/RTS 走 ioctl 应优雅降级
+    var modemOK: Bool? = nil
+    wired.applyModemLines(ModemLines(flowControl: true, dtr: 1, rts: 1)) { ok, _ in
+        modemOK = ok
+    }
+    check(waitMain { modemOK != nil }, "MODEM 配置有回调(不卡死)")
+    tcgetattr(probe, &tio)
+    check((tio.c_cflag & tcflag_t(CRTSCTS)) != 0, "CRTSCTS 流控标志已写入")
+    check(modemOK == true, "DTR/RTS 不支持时整体仍返回成功(降级提示)")
+
+    // 断开: 状态落定, 后续发送被静默丢弃(不崩溃)
+    wired.disconnect()
+    check(waitMain { wired.connectionState == .disconnected }, "主动断开状态落定")
+    wired.send(Data("AFTER".utf8))
+    check(true, "断开后发送丢弃不崩溃")
+
+    Darwin.close(probe)
+    Darwin.close(master)
+    Darwin.close(slave)
+
+    // 打开不存在的设备: 明确失败
+    let wired2 = WiredSerialPort()
+    var failedMsg: String? = nil
+    wired2.onConnectionChange = { st in
+        if case .failed(let m) = st { failedMsg = m }
+    }
+    wired2.connect(path: "/dev/cu.不存在的设备", name: "ghost",
+                   params: .default, flowControl: false)
+    check(waitMain { failedMsg != nil }, "打开不存在设备明确失败", failedMsg ?? "")
+}
+
+print("== SerialPortEnumerator ==")
+do {
+    let ports = SerialPortEnumerator.listPorts()
+    check(true, "枚举不崩溃(本机 \(ports.count) 个串口设备)")
+    check(ports.allSatisfy { $0.path.hasPrefix("/dev/cu.") }, "枚举结果均为 callout 设备")
+}
+
 print("== SettingsStore ==")
 do {
     // 自检使用显式注入的独立 suite, 与正式 App 的偏好域(cn.wch.CH9140Bridge)完全隔离,

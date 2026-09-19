@@ -14,6 +14,18 @@ struct DeviceListView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            // 数据源切换: 蓝牙(CH9140) / 有线串口
+            Picker("", selection: $model.listSource) {
+                Text("蓝牙").tag(BridgeModel.LinkKind.ble)
+                Text("有线").tag(BridgeModel.LinkKind.wired)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 10)
+            .padding(.top, 8)
+            .padding(.bottom, 2)
+
+            if model.listSource == .ble {
             // 扫描控制
             HStack {
                 Button {
@@ -58,6 +70,10 @@ struct DeviceListView: View {
             deviceListArea
                 .frame(minHeight: 100, maxHeight: .infinity)
 
+            } else {
+                WiredPortListView()
+            }
+
             Divider()
 
             // 面板区: 虚拟串口 / 会话日志 —— 固定取内容理想高度, 完整显示
@@ -71,6 +87,7 @@ struct DeviceListView: View {
 
             Divider()
 
+            if model.listSource == .ble {
             // 底部蓝牙状态
             HStack(spacing: 6) {
                 Image(systemName: "bluetooth")
@@ -86,6 +103,7 @@ struct DeviceListView: View {
                 }
             }
             .padding(10)
+            }
         }
     }
 

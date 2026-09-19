@@ -18,7 +18,8 @@
 ---
 
 **无线 Console 调试终端**: 把 **CH9140 蓝牙转串口芯片** 桥接成 Mac 上的**虚拟串口**,
-用于调试交换机/路由器等网络设备的 Console 口。内置**终端仿真器**(SwiftTerm, 键盘直连)、
+用于调试交换机/路由器等网络设备的 Console 口。**也支持直接连接 USB 有线串口**
+(CH340/CP210x/FTDI 等适配器, 无需 CH9140)。内置**终端仿真器**(SwiftTerm, 键盘直连)、
 **收发监视器**(HEX/文本, 中文 UTF-8/GBK 显示)与**会话日志**(raw+clean 双份),
 同时兼容任意串口工具(screen / minicom / CoolTerm / PuTTY / SecureCRT 等)。
 
@@ -30,6 +31,7 @@
 
 | 功能 | 说明 |
 |---|---|
+| 有线串口 | 直连 `/dev/cu.*` USB 串口(IOKit 枚举友好名), 任意波特率(含 460800/921600 等 PTY 无法表达的高速率), 流控/DTR/RTS(TIOCM*), CTS/DSR/RI/DCD 状态灯, 拔出自动落定+自动重连 |
 | BLE 扫描/连接 | 自动过滤 CH9140 透传服务(0xFFF0), 可切换显示全部设备, 信号强度排序 |
 | 设备 MAC 识别 | 连接就绪时自动解析设备真实 MAC(每两位 `-` 分割, 如 `DC-04-5A-5E-12-5B`), 显示于 最近连接/发现设备/状态栏; CH9140 出厂同名, MAC 是区分不同芯片的稳定标识。CoreBluetooth 不提供 MAC, 经系统蓝牙报告查询并缓存到最近连接 |
 | 虚拟串口 | 基于 PTY 伪终端, 无需内核扩展; 路径 `~/Library/Application Support/BLE2TTY/cu.CH9140` |
@@ -52,7 +54,7 @@ open BLE2TTY.app        # 运行
 只需 Xcode Command Line Tools(无需完整 Xcode)。首次运行会弹蓝牙权限请求,
 或在 **系统设置 → 隐私与安全性 → 蓝牙** 中允许 BLE2TTY。
 
-运行自检(137 项: 协议编解码与帧拆分/PTY 数据通路/日志/raw+clean 双份/行装配与 OSC 过滤/设置/MAC 解析):
+运行自检(154 项: 协议编解码与帧拆分/PTY 数据通路/有线串口(PTY 对模拟)/日志/raw+clean 双份/行装配与 OSC 过滤/设置/MAC 解析):
 
 ```bash
 swift run CH9140SelfTest
@@ -73,6 +75,17 @@ swift run CH9140SelfTest
    CoolTerm/minicom 等 GUI 工具里填同样的路径即可。
 4. 串口工具里设什么波特率, 芯片就自动切到什么波特率(设置里可关闭"自动同步")。注意 macOS PTY 可表达的标准波特率上限为 **230400**, 串口工具设 460800 及以上不会被同步(日志有告警), 需要更高速率时请直接在控制面板下发。
 5. 日志默认保存在 `~/Documents/CH9140Logs/`(可自定义), 默认按日期分目录存储, 自动记录全部会话。
+
+### 有线模式(USB 串口, 无需 CH9140)
+
+1. 左栏顶部切到 **有线** → 点 **刷新列表** → 选择端口(显示 USB Product Name)→ **连接**。
+2. 打开时即以工具条上的当前参数(波特率/数据位/停止位/校验/流控)配置串口;
+   之后改动点「应用」即时生效(termios 本地设置)。
+3. 与 BLE 模式共用同一套 终端/监视/日志/发送区; DTR/RTS 与 CTS/DSR/RI/DCD 状态灯
+   在真实适配器上有效(PTY 等伪终端不支持 MODEM 线, 自动降级)。
+   驱动说明: **FTDI / CDC-ACM macOS 内置**; CH340/CH341 装 [WCH CH34x VCP 驱动](https://www.wch.cn/downloads/CH34XSER_MAC_ZIP.html);
+   CP210x 装 SiLabs VCP 驱动; 枚举不到设备时先查驱动。
+4. 有线模式支持任意高波特率(如 460800/921600, 不受虚拟串口 230400 上限约束)。
 
 ## 设置面板(⌘,)
 
@@ -100,6 +113,7 @@ BLE2TTY.app/Contents/MacOS/BLE2TTY --cli \
 | `--port-name` | `CH9140` | 虚拟串口名(构成 `cu.<名称>`) |
 | `--timeout` | `45` | 扫描/连接总超时(秒) |
 | `--uuid` | 无 | 多块同名芯片同场时按 CoreBluetooth UUID 直连(跳过扫描按名匹配) |
+| `--wired` | 无 | 有线串口监视模式: 直接打开指定 `/dev/cu.*`(无需 CH9140/蓝牙), 打印收发 |
 
 通道就绪后打印 `CLI_READY port=… compat=…`(供脚本解析), 之后每 10 秒打印
 一次双向字节统计。退出码: `0` 收到 SIGTERM 正常退出, `2` 连接失败或超时,
@@ -134,12 +148,12 @@ ble2tty/
 │   ├── CH9140Core/              # 核心库
 │   │   ├── Protocol/            #   CH9140 协议编解码(0x06/0x86/0x07/0x87/0x88)
 │   │   ├── BLE/                 #   CoreBluetooth 中心端
-│   │   ├── Serial/              #   PTY 虚拟串口
+│   │   ├── Serial/              #   PTY 虚拟串口 / 有线串口(WiredSerialPort) / IOKit 枚举
 │   │   ├── Logging/             #   会话日志
 │   │   ├── Settings/            #   UserDefaults 设置
 │   │   └── BridgeModel.swift    #   粘合层
 │   ├── BLE2TTY/                 # SwiftUI App(界面 + --cli 无界面入口)
-│   └── CH9140SelfTest/          # 自检程序(137 项断言)
+│   └── CH9140SelfTest/          # 自检程序(154 项断言)
 └── BLE2TTY.app                  # 构建产物
 ```
 
@@ -174,6 +188,10 @@ A: macOS PTY 的 termios 标准波特率上限为 230400, 超限的设定无法�
 
 **Q: 串口工具提示"Permission denied"？**  
 A: 检查系统设置 → 隐私与安全性 → 蓝牙，确保 BLE2TTY 已授权
+
+**Q: 有线模式提示串口被占用？**  
+A: 串口同一时刻最好只被一个程序使用。App 打开时会尝试独占(TIOCEXCL, 驱动层尽力而为),
+请先退出 screen/minicom/CoolTerm 再连接; 用 `lsof /dev/cu.xxx` 可查占用者。
 
 **Q: 连接后没有数据？**  
 A: 检查 CH9140 模块与目标设备的串口连线，确认波特率一致

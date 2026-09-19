@@ -27,6 +27,7 @@ enum CLIRunner {
         var portName = "CH9140"
         var timeout: Double = 45
         var uuidArg: UUID? = nil
+        var wiredArg: String? = nil
 
         var args = Array(CommandLine.arguments.dropFirst()).filter { $0 != "--cli" }
         var i = 0
@@ -38,6 +39,7 @@ enum CLIRunner {
             case ("--baud", let v?):       baud = UInt32(v) ?? 115200;            i += 2
             case ("--port-name", let v?):  portName = v;                          i += 2
             case ("--timeout", let v?):    timeout = Double(v) ?? 45;             i += 2
+            case ("--wired", let v?):   wiredArg = v;                           i += 2
             case ("--uuid", let v?):
                 guard let u = UUID(uuidString: v) else {
                     print("[CLI] --uuid 参数不是合法 UUID: \(v)")
@@ -48,6 +50,11 @@ enum CLIRunner {
             }
         }
         args.removeAll()
+
+        // 有线串口模式: 无需 CH9140/蓝牙, 直接打开 /dev/cu.* 监视收发
+        if let wiredPath = wiredArg {
+            runWiredMonitor(path: wiredPath, baud: baud, timeout: timeout)
+        }
 
         let ble = BLEManager()
         let port = VirtualSerialPort()
@@ -187,6 +194,79 @@ enum CLIRunner {
             if state.ready {
                 say("[CLI] 统计: 芯片->串口 \(state.rxBytes)B / 串口->芯片 \(state.txBytes)B")
             }
+        }
+
+        RunLoop.main.run()
+        fatalError("unreachable")
+    }
+
+    /// 有线串口监视模式: 打开串口打印收发, 信号优雅退出; 失败在超时预算内重试
+    static func runWiredMonitor(path: String, baud: UInt32, timeout: Double) -> Never {
+        func say(_ s: String) { print(s); fflush(stdout) }
+
+        let wired = WiredSerialPort()
+        let start = Date()
+        var rxBytes = 0          // 仅主线程(onReceive 在主线程回调)
+        var ready = false
+
+        say("[CLI] 有线串口模式 端口=\(path) 波特率=\(baud)")
+
+        signal(SIGINT, SIG_IGN)
+        signal(SIGTERM, SIG_IGN)
+        let sigInt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        sigInt.setEventHandler {
+            say("[CLI] 收到 SIGINT, 清理退出")
+            wired.disconnect()
+            exit(130)
+        }
+        sigInt.resume()
+        let sigTerm = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        sigTerm.setEventHandler {
+            say("[CLI] 收到 SIGTERM, 清理退出")
+            wired.disconnect()
+            exit(0)
+        }
+        sigTerm.resume()
+
+        wired.onLog = { say("[UART] \($0)") }
+        wired.onReceive = { data in
+            rxBytes += data.count
+            say("[RX \(data.count)B] \(String(decoding: data, as: UTF8.self))")
+        }
+        wired.onConnectionChange = { st in
+            switch st {
+            case .ready:
+                say("CLI_READY wired=\(path)")
+                ready = true
+            case .failed(let m):
+                say("[CLI] 打开失败: \(m)")
+                if Date().timeIntervalSince(start) + 2 < timeout {
+                    say("[CLI] 2 秒后重试…")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        if !ready {
+                            wired.connect(path: path, name: path,
+                                          params: SerialParameters(baudRate: baud,
+                                                                   dataBits: 8, stopBits: 1, parity: 0),
+                                          flowControl: false)
+                        }
+                    }
+                } else {
+                    exit(2)
+                }
+            case .disconnected:
+                say("[CLI] 串口已断开(设备拔出?), 退出")
+                exit(4)
+            default:
+                break
+            }
+        }
+
+        wired.connect(path: path, name: path,
+                      params: SerialParameters(baudRate: baud, dataBits: 8, stopBits: 1, parity: 0),
+                      flowControl: false)
+
+        Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { _ in
+            if ready { say("[CLI] 统计: 共接收 \(rxBytes)B") }
         }
 
         RunLoop.main.run()

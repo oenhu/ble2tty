@@ -212,9 +212,11 @@ struct TerminalView: View {
     ]
     static let parityShort = ["无", "奇", "偶", "标志", "空白"]
 
-    /// 「写入芯片」的提示: 含最近一次成功下发到芯片的参数
+    /// 「写入芯片/应用」的提示: 含最近一次成功下发的参数
     private var writeChipHelp: String {
-        var tip = "通过 0xFFF3 配置通道下发串口参数(指令 0x06), 芯片回包校验"
+        var tip = model.activeLinkKind == .ble
+            ? "通过 0xFFF3 配置通道下发串口参数(指令 0x06), 芯片回包校验"
+            : "经 termios 本地设置串口参数, 立即生效"
         if let active = model.activeSerial {
             tip += "\n芯片当前: \(active.baudRate)/\(active.dataBits)/\(active.stopBits)/\(Self.parityShort[Int(min(active.parity, 4))])"
         }
@@ -265,10 +267,10 @@ struct TerminalView: View {
             .labelsHidden()
             .frame(width: 56)
             .help("校验位")
-            Button(model.applyingConfig ? "配置中…" : "写入芯片") {
+            Button(model.applyingConfig ? "配置中…" : (model.activeLinkKind == .ble ? "写入芯片" : "应用")) {
                 model.applySerialParameters()
             }
-            .disabled(!ble.isReady || model.applyingConfig)
+            .disabled(!model.isLinkReady || model.applyingConfig)
             .help(writeChipHelp)
         }
     }
@@ -365,6 +367,17 @@ struct TerminalView: View {
                     break
                 }
             }
+            .onChange(of: model.wired.connectionState) { state in
+                guard model.activeLinkKind == .wired else { return }
+                switch state {
+                case .ready:
+                    termFeeder.feed(Data("\u{1B}[32mConnected: \(model.wired.connectedPortName) (\(model.wired.connectedPortPath))\u{1B}[0m\r\n".utf8))
+                case .disconnected:
+                    termFeeder.feed(Data("\u{1B}[31mDisconnected\u{1B}[0m\r\n".utf8))
+                default:
+                    break
+                }
+            }
 
             // 发送区仅监视模式显示(终端模式键盘输入由 SwiftTerm 直接接管)
             if mode == .monitor {
@@ -378,7 +391,7 @@ struct TerminalView: View {
                     if interactive {
                         ConsoleKeyView { data in model.sendInteractive(data) }
                             .frame(height: 28)
-                            .opacity(ble.isReady ? 1 : 0.5)
+                            .opacity(model.isLinkReady ? 1 : 0.5)
                     } else {
                         sendRowContent
                     }
@@ -427,8 +440,8 @@ struct TerminalView: View {
                     .buttonStyle(.borderedProminent)
                     .fixedSize()
                     .keyboardShortcut(.return, modifiers: [.command])
-                    .disabled(!ble.isReady)
-                    .help(ble.isReady ? "发送到 CH9140 (⌘⏎)" : "连接设备后才能发送")
+                    .disabled(!model.isLinkReady)
+                    .help(model.isLinkReady ? "发送 (⌘⏎)" : "连接设备后才能发送")
             }
     }
 

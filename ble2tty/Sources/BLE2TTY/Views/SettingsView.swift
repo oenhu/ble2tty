@@ -85,7 +85,7 @@ private struct GeneralSettingsTab: View {
                     }
                     Button("应用") { model.applyModemLines() }
                         .controlSize(.small)
-                        .disabled(!ble.isReady)
+                        .disabled(!model.isLinkReady)
                         .help("通过 0xFFF3 配置通道下发流控与 MODEM 输出(指令 0x07)")
                 }
                 Toggle("硬件流控(CTS/RTS)", isOn: $model.editFlowControl)
