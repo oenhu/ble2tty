@@ -45,11 +45,18 @@ public enum DeviceMACResolver {
         proc.arguments = ["SPBluetoothDataType", "-json"]
         let out = Pipe()
         proc.standardOutput = out
-        proc.standardError = Pipe()
+        // stderr 不消费: 直接丢弃(若用 Pipe 而不读, 写满 64KB 后子进程阻塞)
+        proc.standardError = FileHandle.nullDevice
         do { try proc.run() } catch { return nil }
-        proc.waitUntilExit()
-        guard proc.terminationStatus == 0 else { return nil }
+        // 兜底超时: system_profiler 异常挂起时主动终止, 防止读取永久阻塞
+        let watchdog = DispatchWorkItem { if proc.isRunning { proc.terminate() } }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 15, execute: watchdog)
+        // 必须先读再 waitUntilExit: 输出超过管道缓冲(64KB, 配对设备多的机器可达)时
+        // 子进程阻塞在写、父进程阻塞在等退出, 顺序颠倒即死锁
         let data = out.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        watchdog.cancel()
+        guard proc.terminationStatus == 0 else { return nil }
         guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
               let report = (obj["SPBluetoothDataType"] as? [[String: Any]])?.first,
               let connected = report["device_connected"] as? [[String: Any]] else { return nil }

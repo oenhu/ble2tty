@@ -35,6 +35,8 @@ struct TerminalTextView: NSViewRepresentable {
     let hideSystem: Bool
     let autoScroll: Bool
     let generation: Int
+    /// 数据 -> 显示文本(UTF-8/GBK 解码, 由 BridgeModel.displayText 提供)
+    let decodeText: (Data) -> String
 
     final class Coordinator {
         var lastSignature = ""
@@ -175,13 +177,13 @@ struct TerminalTextView: NSViewRepresentable {
             body = "● " + line.text
             color = .systemOrange
         case .rx:
-            body = hex ? HexUtil.hexString(line.data) : HexUtil.printableASCII(line.data)
+            body = hex ? HexUtil.hexString(line.data) : decodeText(line.data)
             color = .labelColor
         case .tx:
             // 行尾换行符是发送时的行尾附加(传输修饰), 文本/HEX 两种模式一致剥离
             var d = line.data
             while d.last == 0x0D || d.last == 0x0A { d = d.dropLast() }
-            body = "→ " + (hex ? HexUtil.hexString(d) : HexUtil.printableASCII(d))
+            body = "→ " + (hex ? HexUtil.hexString(d) : decodeText(d))
             color = .systemBlue
         }
         result.append(NSAttributedString(string: body + "\n",
@@ -334,7 +336,8 @@ struct TerminalView: View {
                                  showTimestamp: showTimestamps,
                                  hideSystem: hideSystem,
                                  autoScroll: autoScroll,
-                                 generation: model.terminalGeneration)
+                                 generation: model.terminalGeneration,
+                                 decodeText: { model.displayText($0) })
                     .opacity(mode == .monitor ? 1 : 0)
                     .allowsHitTesting(mode == .monitor)
 

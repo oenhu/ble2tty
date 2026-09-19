@@ -16,8 +16,8 @@ public struct LineAssembler {
 
     public private(set) var pending = Data()
     private var sawCR = false
-    /// ANSI 转义解析状态: none -> esc(收到 ESC) -> csi(收到 ESC [)
-    private enum EscState { case none, esc, csi }
+    /// ANSI 转义解析状态: none -> esc(收到 ESC) -> csi(ESC [) / osc(ESC ]) / escIntermediate(ESC + 中间字节)
+    private enum EscState { case none, esc, escIntermediate, csi, osc, oscEsc }
     private var escState: EscState = .none
     public var onBell: (() -> Void)?
 
@@ -29,12 +29,31 @@ public struct LineAssembler {
         for b in bytes {
             switch escState {
             case .esc:
-                // ESC 后只有 '[' 才进入 CSI 序列, 否则按两字节序列吞掉
-                escState = (b == 0x5B) ? .csi : .none
+                // '[' 进 CSI; ']' 进 OSC; 中间字节(0x20-0x2F)进三字节序列; 其余按双字节序列吞掉
+                switch b {
+                case 0x5B:        escState = .csi
+                case 0x5D:        escState = .osc
+                case 0x20...0x2F: escState = .escIntermediate
+                default:          escState = .none
+                }
+                continue
+            case .escIntermediate:
+                // 三字节序列(ESC(0 字符集 / ESC#8 DECALN 等): 等到末字节 (0x30...0x7E)
+                if (0x30...0x7E).contains(b) { escState = .none }
                 continue
             case .csi:
                 // CSI: 跳过参数/中间字节直到最终字节 (0x40...0x7E)
                 if (0x40...0x7E).contains(b) { escState = .none }
+                continue
+            case .osc:
+                // OSC(窗口标题等): 整段吞掉, BEL 结束; ESC 则可能是 ST(ESC \) 的前半
+                // 注意: 作为终止符的 BEL 不触发 onBell
+                if b == 0x07 { escState = .none }
+                else if b == 0x1B { escState = .oscEsc }
+                continue
+            case .oscEsc:
+                // ST 收齐则结束, 否则仍在 OSC 内容中
+                escState = (b == 0x5C) ? .none : .osc
                 continue
             case .none:
                 break

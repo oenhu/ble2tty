@@ -149,4 +149,31 @@ public enum CH9140Protocol {
             return nil
         }
     }
+
+    /// 已知指令的整帧长度(命令字 + 3 字节头 + 负载 + 校验和)
+    private static let frameLengths: [UInt8: Int] = [0x86: 12, 0x87: 8, 0x88: 7]
+
+    /// 拆分解码配置通道上行字节流: 容忍一次通知粘连多帧或夹带噪声字节。
+    /// 逐帧独立校验; 无法识别的字节归入 residue 交调用方记日志, 不影响后续帧解析。
+    public static func decodeFrames(_ data: Data) -> (packets: [ConfigPacket], residue: Data) {
+        let b = [UInt8](data)
+        var packets: [ConfigPacket] = []
+        var residue = Data()
+        var i = 0
+        while i < b.count {
+            guard let len = frameLengths[b[i]] else {
+                residue.append(b[i]); i += 1; continue          // 未知命令字: 逐字节重同步
+            }
+            guard i + len <= b.count else {
+                residue.append(contentsOf: b[i...])             // 截断半帧(固件分包, 下一通知无法续接, 丢弃)
+                break
+            }
+            if let pkt = decode(Data(b[i..<(i + len)])) {
+                packets.append(pkt); i += len
+            } else {
+                residue.append(b[i]); i += 1                    // 校验失败: 逐字节重同步
+            }
+        }
+        return (packets, residue)
+    }
 }

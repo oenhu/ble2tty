@@ -849,6 +849,67 @@ do {
     check(h.feed(Data([CR, LF])) == [Data()], "空行成行")
 }
 
+print("== LineAssembler OSC / 三字节序列 ==")
+do {
+    func B(_ s: String) -> Data { Data(s.utf8) }
+    let BEL: UInt8 = 0x07, ESC: UInt8 = 0x1B, LF: UInt8 = 0x0A
+
+    // OSC(窗口标题) BEL 终止: 整段吞掉, 标题文本不得入行
+    var a = LineAssembler()
+    check(a.feed([ESC] + B("]0;user@switch:~") + [BEL] + B("Switch#") + [LF]) == [B("Switch#")],
+          "OSC(BEL 终止)整段过滤")
+
+    // OSC ST(ESC \) 终止
+    var b = LineAssembler()
+    check(b.feed([ESC] + B("]0;title") + [ESC] + B("\\") + B("abc") + [LF]) == [B("abc")],
+          "OSC(ST 终止)整段过滤")
+
+    // OSC 内的 BEL 只作终止符, 不触发提示音
+    var c = LineAssembler()
+    var bells = 0
+    c.onBell = { bells += 1 }
+    _ = c.feed([ESC] + B("]0;t") + [BEL] + B("x") + [BEL, LF])
+    check(bells == 1, "OSC 终止 BEL 不响铃, 内容后 BEL 正常响铃", "bells=\(bells)")
+
+    // OSC 跨包: 半个序列暂存, 不泄漏内容
+    var d = LineAssembler()
+    _ = d.feed([ESC] + B("]0;ti"))
+    check(d.feed(B("tle") + [BEL] + B("ok") + [LF]) == [B("ok")], "OSC 跨包过滤")
+
+    // 三字节序列 ESC(0 字符集 / ESC#8: 末字节不得漏入文本
+    var e = LineAssembler()
+    check(e.feed([ESC] + B("(0") + B("hi") + [LF]) == [B("hi")], "ESC(0 三字节序列过滤")
+    var f = LineAssembler()
+    check(f.feed([ESC] + B("#8") + B("hi") + [LF]) == [B("hi")], "ESC#8 三字节序列过滤")
+}
+
+print("== CH9140Protocol 帧拆分(decodeFrames) ==")
+do {
+    let f86 = Data([0x86, 0x00, 0x09, 0x00, 0x00, 0xC2, 0x01, 0x00, 0x08, 0x01, 0x00, 0xCC])   // 115200 8N1
+    let f88 = Data([0x88, 0x00, 0x03, 0x00, 0x01, 0x00, 0x01])                                  // 空闲状态
+
+    // 粘连两帧一次通知: 两帧都应解出
+    let (p1, r1) = CH9140Protocol.decodeFrames(f86 + f88)
+    check(p1.count == 2 && r1.isEmpty, "粘连双帧全部解出", "packets=\(p1.count)")
+    if case .serialParameters(let sp) = p1.first {
+        check(sp.baudRate == 115200, "首帧为串口参数回包")
+    } else { check(false, "首帧为串口参数回包") }
+    if case .status = p1.last { check(true, "次帧为状态上报") } else { check(false, "次帧为状态上报") }
+
+    // 噪声字节前缀: 逐字节重同步后帧仍可解出
+    let (p2, r2) = CH9140Protocol.decodeFrames(Data([0x55, 0xAA]) + f86)
+    check(p2.count == 1 && r2 == Data([0x55, 0xAA]), "噪声前缀重同步", "packets=\(p2.count) residue=\(HexUtil.hexString(r2))")
+
+    // 截断半帧: 归入 residue, 不崩溃不误解
+    let (p3, r3) = CH9140Protocol.decodeFrames(f86.prefix(8))
+    check(p3.isEmpty && r3.count == 8, "截断半帧归入 residue")
+
+    // 校验和错误的帧: 跳过坏帧后后续好帧仍解出
+    var bad = f86; bad[bad.count - 1] ^= 0xFF
+    let (p4, r4) = CH9140Protocol.decodeFrames(bad + f88)
+    check(p4.count == 1 && !r4.isEmpty, "坏帧跳过, 后续好帧解出", "packets=\(p4.count)")
+}
+
 print("== SettingsStore ==")
 do {
     // 自检使用显式注入的独立 suite, 与正式 App 的偏好域(cn.wch.CH9140Bridge)完全隔离,

@@ -26,6 +26,7 @@ enum CLIRunner {
         var baud: UInt32 = 115200
         var portName = "CH9140"
         var timeout: Double = 45
+        var uuidArg: UUID? = nil
 
         var args = Array(CommandLine.arguments.dropFirst()).filter { $0 != "--cli" }
         var i = 0
@@ -37,6 +38,12 @@ enum CLIRunner {
             case ("--baud", let v?):       baud = UInt32(v) ?? 115200;            i += 2
             case ("--port-name", let v?):  portName = v;                          i += 2
             case ("--timeout", let v?):    timeout = Double(v) ?? 45;             i += 2
+            case ("--uuid", let v?):
+                guard let u = UUID(uuidString: v) else {
+                    print("[CLI] --uuid 参数不是合法 UUID: \(v)")
+                    exit(64)   // EX_USAGE
+                }
+                uuidArg = u;                                                      i += 2
             default: i += 1
             }
         }
@@ -45,10 +52,40 @@ enum CLIRunner {
         let ble = BLEManager()
         let port = VirtualSerialPort()
         let state = StateBox()
+        let start = Date()
 
         func say(_ s: String) { print(s); fflush(stdout) }
 
-        say("[CLI] 无界面桥接模式 目标设备=\(name) 波特率=\(baud)")
+        say("[CLI] 无界面桥接模式 目标设备=\(uuidArg?.uuidString ?? name) 波特率=\(baud)")
+
+        // 优雅退出: SIGINT/SIGTERM 时清理虚拟串口符号链接, 不残留失效 cu.* 路径
+        signal(SIGINT, SIG_IGN)
+        signal(SIGTERM, SIG_IGN)
+        let sigInt = DispatchSource.makeSignalSource(signal: SIGINT, queue: .main)
+        sigInt.setEventHandler {
+            say("[CLI] 收到 SIGINT, 清理退出")
+            port.close()
+            exit(130)
+        }
+        sigInt.resume()
+        let sigTerm = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        sigTerm.setEventHandler {
+            say("[CLI] 收到 SIGTERM, 清理退出")
+            port.close()
+            exit(0)
+        }
+        sigTerm.resume()
+
+        // 发起一次连接尝试: 指定 --uuid 时直连(多块同名 CH9140 同场必备), 否则扫描按名匹配
+        func beginAttempt() {
+            if let u = uuidArg {
+                state.connecting = true
+                say("[CLI] 按 UUID 直连 \(u.uuidString) …")
+                ble.connect(uuid: u, name: name)
+            } else {
+                ble.startScan(showAll: false)
+            }
+        }
 
         ble.onLog  = { say("[BLE] \($0)") }
         port.onLog = { say("[PTY] \($0)") }
@@ -90,8 +127,12 @@ enum CLIRunner {
                     }
                     do {
                         let link = try port.open(name: portName)
-                        say("CLI_READY port=\(link) compat=\(port.compatLinkPath)")
-                        state.ready = true
+                        // open() 的"虚拟串口已创建"日志经主队列异步投递,
+                        // CLI_READY 也排队到其后, 避免就绪行出现在创建日志之前的误导顺序
+                        DispatchQueue.main.async {
+                            say("CLI_READY port=\(link) compat=\(port.compatLinkPath)")
+                            state.ready = true
+                        }
                     } catch {
                         say("[CLI] 创建虚拟串口失败: \(error.localizedDescription)")
                         exit(3)
@@ -99,7 +140,17 @@ enum CLIRunner {
                 }
             case .failed(let m):
                 say("[CLI] 连接失败: \(m)")
-                exit(2)
+                // 无人值守场景: 总超时预算内 2 秒后重试, 一次瞬时失败不杀死桥接
+                if Date().timeIntervalSince(start) + 2 < timeout {
+                    state.connecting = false
+                    say("[CLI] 2 秒后重试…")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                        // 扫描轮询可能已先行发起新尝试, 避免重复
+                        if !state.ready && !state.connecting { beginAttempt() }
+                    }
+                } else {
+                    exit(2)
+                }
             case .disconnected:
                 // CLI 不做自动重连: 连接断开(无论是否已就绪)即收尾退出,
                 // 清理虚拟串口符号链接, 避免进程变僵尸/残留链接
@@ -111,11 +162,10 @@ enum CLIRunner {
             }
         }
 
-        // 开始扫描
-        ble.startScan(showAll: false)
+        // 开始首次连接尝试
+        beginAttempt()
 
         // 扫描/连接状态机轮询
-        let start = Date()
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
             if state.ready || state.connecting { return }
             if Date().timeIntervalSince(start) > timeout {

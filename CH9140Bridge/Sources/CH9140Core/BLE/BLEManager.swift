@@ -69,9 +69,19 @@ public final class BLEManager: NSObject, ObservableObject {
     private var wantScan = false
     private var scanShowAll = false
 
-    // 透传发送队列
-    private var outbox = Data()
+    // 透传发送队列: 分块 FIFO(头部索引 + 定期压缩),
+    // 取代 Data + removeFirst 的 O(n²) 搬移(满缓冲 drain 时曾达数百 MB memcpy)
+    private var outboxChunks: [Data] = []
+    private var outboxHead = 0
+    private var outboxBytes = 0
     private var chipFullFlag = false
+    /// 芯片缓冲满看门狗: "已空"上报丢失时防止 TX 永久停摆(仅 bleQueue)
+    private var chipFullWatchdog: DispatchWorkItem?
+    /// 扫描发现时间(仅 bleQueue): 淘汰长时间未再见到的设备, 防止列表/引用无界增长
+    private var discoveredAt: [UUID: Date] = [:]
+    /// 按 UUID 直连时系统未缓存设备 -> 转扫描查找的挂起状态(仅 bleQueue)
+    private var pendingScanConnect: (uuid: UUID, name: String)?
+    private var pendingScanTimeout: DispatchWorkItem?
 
     // 配置应答匹配
     private var pendingSerial: ((Bool, String) -> Void)?
@@ -89,6 +99,8 @@ public final class BLEManager: NSObject, ObservableObject {
     private var deviceFlushScheduled = false
     /// 设备列表发布节奏(秒)
     private static let deviceFlushInterval: Double = 0.4
+    /// 设备多久(秒)没再广播就被移出列表(当前连接除外)
+    private static let deviceStaleInterval: Double = 60
 
     /// 当前连接的设备 UUID(用于 UI 高亮/自动重连)。
     /// 统一在主线程写入(@Published 要求), bleQueue 侧的连接判定用 activePeripheralID。
@@ -127,6 +139,7 @@ public final class BLEManager: NSObject, ObservableObject {
                 return
             }
             self.peripherals.removeAll()
+            self.discoveredAt.removeAll()
             self.pendingDeviceUpdates.removeAll()   // 丢弃上一轮扫描的待发布残留
             // @Published 必须在主线程更新
             self.updateMain { $0.devices.removeAll() }
@@ -143,6 +156,14 @@ public final class BLEManager: NSObject, ObservableObject {
     public func stopScan() {
         bleQueue.async {
             self.wantScan = false
+            // 用户显式停止扫描: 若扫描正在为挂起连接服务, 一并取消并落定状态,
+            // 否则状态会停在 connecting 直到 10s 超时
+            if self.pendingScanConnect != nil {
+                self.cancelPendingScanConnect()
+                self.activePeripheralID = nil
+                self.updateMain { $0.connectedUUID = nil }
+                self.setState(.disconnected)
+            }
             if self.central.isScanning { self.central.stopScan() }
             self.flushDeviceUpdates()
             self.updateMain { $0.isScanning = false }
@@ -153,6 +174,11 @@ public final class BLEManager: NSObject, ObservableObject {
 
     public func connect(_ device: DiscoveredDevice) {
         bleQueue.async {
+            guard self.central.state == .poweredOn else {
+                self.log("蓝牙未开启, 无法连接")
+                self.setState(.failed("蓝牙未开启"))
+                return
+            }
             guard let p = self.peripherals[device.id] ?? device.peripheral else {
                 self.log("设备引用已失效, 请重新扫描")
                 return
@@ -170,9 +196,16 @@ public final class BLEManager: NSObject, ObservableObject {
     /// 按 UUID 直连(系统已知的设备, 无需先扫描)
     public func connect(uuid: UUID, name: String) {
         bleQueue.async {
+            guard self.central.state == .poweredOn else {
+                self.log("蓝牙未开启, 无法连接 \(name)")
+                self.setState(.failed("蓝牙未开启"))
+                return
+            }
             let found = self.central.retrievePeripherals(withIdentifiers: [uuid])
             guard let p = found.first else {
-                self.log("未找到设备 \(name)(\(uuid.uuidString.prefix(8))), 请先扫描")
+                // 系统未缓存(蓝牙重启/换机/系统状态重置): 转扫描按 UUID 查找,
+                // 不再静默放弃——自动重连承诺靠这条路继续兑现
+                self.startPendingScanConnect(uuid: uuid, name: name)
                 return
             }
             self.peripherals[uuid] = p
@@ -189,6 +222,7 @@ public final class BLEManager: NSObject, ObservableObject {
     /// 在 bleQueue 调用: 发起连接并启动超时保护(覆盖 连接+服务发现 全程, ready 时解除)
     private func startConnecting(_ p: CBPeripheral) {
         isReadyOnQueue = false
+        cancelPendingScanConnect()
         // 转连新目标前先清理旧连接: CoreBluetooth 允许同时连多个外设,
         // 不主动断开的话旧设备的数据会继续从 FFF1 涌进来造成串流
         if let old = connectingPeripheral, !old.isEqual(p) {
@@ -199,8 +233,7 @@ public final class BLEManager: NSObject, ObservableObject {
             central.cancelPeripheralConnection(old)
             peripheral = nil
             readChar = nil; writeChar = nil; configChar = nil
-            outbox.removeAll()
-            chipFullFlag = false
+            clearOutbox()
         }
         connectTimeout?.cancel()
         connectingPeripheral = p
@@ -232,6 +265,11 @@ public final class BLEManager: NSObject, ObservableObject {
             self.updateMain { $0.connectedUUID = nil }
             let p = self.peripheral ?? self.connectingPeripheral
             self.disarmConnectTimeout()
+            // 取消"转扫描查找"阶段的挂起连接(其专用扫描一并停止)
+            if self.pendingScanConnect != nil {
+                self.cancelPendingScanConnect(stopScan: true)
+                self.activePeripheralID = nil
+            }
             let wasEstablished = self.peripheral != nil
             if let p {
                 self.log("主动断开连接")
@@ -244,8 +282,7 @@ public final class BLEManager: NSObject, ObservableObject {
                 self.isReadyOnQueue = false
                 self.peripheral = nil
                 self.readChar = nil; self.writeChar = nil; self.configChar = nil
-                self.outbox.removeAll()
-                self.chipFullFlag = false
+                self.clearOutbox()
                 self.stopRSSIPolling()
                 self.setState(.disconnected)
             }
@@ -262,13 +299,18 @@ public final class BLEManager: NSObject, ObservableObject {
             // 仅在透传通道就绪时排队: 断连期间(如串口工具仍在写虚拟串口)的数据
             // 直接丢弃, 防止陈旧数据在下次连接时"复活"发给新连接的设备
             guard self.isReadyOnQueue else { return }
-            self.outbox.append(data)
+            self.outboxChunks.append(data)
+            self.outboxBytes += data.count
             // 芯片缓冲长期满载(如流控卡死/对端不读)时防止内存无限增长: 丢弃最旧数据
             let maxOutbox = 256 * 1024
-            if self.outbox.count > maxOutbox {
-                let overflow = self.outbox.count - maxOutbox
-                self.outbox.removeFirst(overflow)
-                self.log("芯片发送缓冲区持续满载, 发送队列溢出, 已丢弃最旧 \(overflow) 字节")
+            if self.outboxBytes > maxOutbox {
+                var dropped = 0
+                while self.outboxBytes > maxOutbox, self.outboxHead < self.outboxChunks.count {
+                    self.outboxBytes -= self.outboxChunks[self.outboxHead].count
+                    dropped += self.outboxChunks[self.outboxHead].count
+                    self.outboxHead += 1
+                }
+                self.log("芯片发送缓冲区持续满载, 发送队列溢出, 已丢弃最旧 \(dropped) 字节")
             }
             self.pumpOutbox()
         }
@@ -278,12 +320,89 @@ public final class BLEManager: NSObject, ObservableObject {
     private func pumpOutbox() {
         guard let p = peripheral, let wc = writeChar, !chipFullFlag else { return }
         let mtu = max(20, p.maximumWriteValueLength(for: .withoutResponse))
-        while !outbox.isEmpty, p.canSendWriteWithoutResponse {
-            let n = min(mtu, outbox.count)
-            let chunk = outbox.prefix(n)
-            p.writeValue(Data(chunk), for: wc, type: .withoutResponse)
-            outbox.removeFirst(n)
+        while outboxHead < outboxChunks.count, p.canSendWriteWithoutResponse {
+            let chunk = outboxChunks[outboxHead]
+            let n = min(mtu, chunk.count)
+            p.writeValue(Data(chunk.prefix(n)), for: wc, type: .withoutResponse)
+            outboxBytes -= n
+            if n == chunk.count {
+                outboxHead += 1
+            } else {
+                // 大块按 MTU 截发: 余量写回(拷贝 ≤ 单块大小, 不再是全队列 O(n) 搬移)
+                outboxChunks[outboxHead] = chunk.dropFirst(n)
+            }
         }
+        // 头部索引前进后定期压缩, 防止数组前缀空洞增长
+        if outboxHead > 64 && outboxHead * 2 > outboxChunks.count {
+            outboxChunks.removeFirst(outboxHead)
+            outboxHead = 0
+        }
+    }
+
+    /// 仅 bleQueue: 清空发送队列并复位芯片流控状态(新会话/断连/蓝牙关闭时)
+    private func clearOutbox() {
+        outboxChunks.removeAll()
+        outboxHead = 0
+        outboxBytes = 0
+        chipFullFlag = false
+        chipFullWatchdog?.cancel()
+        chipFullWatchdog = nil
+    }
+
+    /// 仅 bleQueue: 取消"转扫描查找"的挂起连接
+    private func cancelPendingScanConnect(stopScan: Bool = false) {
+        pendingScanConnect = nil
+        pendingScanTimeout?.cancel()
+        pendingScanTimeout = nil
+        if stopScan, central.isScanning {
+            central.stopScan()
+            updateMain { $0.isScanning = false }
+        }
+    }
+
+    /// 仅 bleQueue: 系统未缓存目标设备时, 转扫描按 UUID 查找(带 10s 超时)
+    private func startPendingScanConnect(uuid: UUID, name: String) {
+        cancelPendingScanConnect()
+        pendingScanConnect = (uuid, name)
+        activePeripheralID = uuid
+        updateMain {
+            $0.connectedUUID = uuid
+            $0.connectedDeviceName = name
+        }
+        setState(.connecting)
+        log("系统未缓存设备 \(name), 转为扫描查找…")
+        if !central.isScanning {
+            central.scanForPeripherals(withServices: nil, options: [
+                CBCentralManagerScanOptionAllowDuplicatesKey: true
+            ])
+            updateMain { $0.isScanning = true }
+        }
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, self.pendingScanConnect != nil else { return }
+            self.pendingScanConnect = nil
+            self.pendingScanTimeout = nil
+            self.activePeripheralID = nil
+            self.updateMain { $0.connectedUUID = nil }
+            self.log("扫描查找超时: 未发现 \(name)(不在范围内或未开机)")
+            self.setState(.failed("扫描查找超时"))
+        }
+        pendingScanTimeout = timeout
+        bleQueue.asyncAfter(deadline: .now() + 10, execute: timeout)
+    }
+
+    /// 仅 bleQueue: 芯片缓冲满看门狗。4 秒未解除则试探恢复发送;
+    /// 若芯片真的仍满, 下一次 0x88 满上报会重新武装看门狗
+    private func armChipFullWatchdog() {
+        let wd = DispatchWorkItem { [weak self] in
+            guard let self, self.chipFullFlag else { return }
+            self.chipFullWatchdog = nil
+            self.chipFullFlag = false
+            self.log("芯片缓冲满状态超过 4 秒未解除, 试探恢复发送(状态上报可能已丢失)")
+            DispatchQueue.main.async { self.chipBufferFull = false }
+            self.pumpOutbox()
+        }
+        chipFullWatchdog = wd
+        bleQueue.asyncAfter(deadline: .now() + 4, execute: wd)
     }
 
     // MARK: - 参数配置 (FFF3)
@@ -415,7 +534,23 @@ extension BLEManager: CBCentralManagerDelegate {
         default: break
         }
         if central.state != .poweredOn {
-            updateMain { $0.isScanning = false }
+            // 蓝牙不可用: CoreBluetooth 不保证对每个外设补发断连回调,
+            // 这里主动落定连接状态, 防止 UI 停在"已就绪"、RSSI 轮询空转
+            let hadLink = peripheral != nil || connectingPeripheral != nil
+                || isReadyOnQueue || pendingScanConnect != nil
+            if hadLink {
+                log("蓝牙不可用, 连接已断开")
+                teardownConnectionOnQueue(configFailReason: "蓝牙已关闭")
+                setState(.disconnected)
+            }
+            // 断电后系统缓存的外设引用全部失效, 一并清除
+            peripherals.removeAll()
+            discoveredAt.removeAll()
+            pendingDeviceUpdates.removeAll()
+            updateMain {
+                $0.isScanning = false
+                $0.devices.removeAll()
+            }
         }
     }
 
@@ -423,6 +558,15 @@ extension BLEManager: CBCentralManagerDelegate {
                                didDiscover p: CBPeripheral,
                                advertisementData: [String: Any],
                                rssi RSSI: NSNumber) {
+        // 重连扫描匹配优先于一切过滤: 目标设备可能不广播 FFF0, 也可能被改名
+        if let pend = pendingScanConnect, p.identifier == pend.uuid {
+            cancelPendingScanConnect(stopScan: true)
+            peripherals[p.identifier] = p
+            discoveredAt[p.identifier] = Date()
+            log("扫描到目标设备 \(pend.name), 发起连接…")
+            startConnecting(p)
+            return
+        }
         let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
             ?? p.name ?? "未知设备"
         let advertised = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
@@ -430,6 +574,7 @@ extension BLEManager: CBCentralManagerDelegate {
             || name.uppercased().hasPrefix("CH91")
         guard self.scanShowAll || isWCH else { return }
         peripherals[p.identifier] = p
+        discoveredAt[p.identifier] = Date()
         // 聚合并安排批量发布(同一设备一个窗口内的多个广播包只保留最新一条)
         pendingDeviceUpdates[p.identifier] = (name, RSSI.intValue, isWCH)
         scheduleDeviceListFlush()
@@ -448,13 +593,25 @@ extension BLEManager: CBCentralManagerDelegate {
 
     /// 在 bleQueue 上调用: 把聚合的广播更新一次性发布到主线程
     private func flushDeviceUpdates() {
-        guard !pendingDeviceUpdates.isEmpty else { return }
+        // 淘汰 60s 未再见到的设备(当前连接除外): 长时间扫描时列表与外设引用不再无界增长
+        let cutoff = Date().addingTimeInterval(-Self.deviceStaleInterval)
+        let staleIDs = discoveredAt.filter { $0.value < cutoff }.map(\.key)
+            .filter { $0 != activePeripheralID }
+        for id in staleIDs {
+            peripherals.removeValue(forKey: id)
+            discoveredAt.removeValue(forKey: id)
+        }
+        let staleSet = Set(staleIDs)
+        guard !pendingDeviceUpdates.isEmpty || !staleSet.isEmpty else { return }
         // 在 bleQueue 上取好外设引用, 避免主线程访问 peripherals
         let batch: [(id: UUID, name: String, rssi: Int, isWCH: Bool, peripheral: CBPeripheral?)] =
             pendingDeviceUpdates.map { ($0.key, $0.value.name, $0.value.rssi, $0.value.isWCH, self.peripherals[$0.key]) }
         pendingDeviceUpdates.removeAll()
         DispatchQueue.main.async {
             let now = Date()
+            if !staleSet.isEmpty {
+                self.devices.removeAll { staleSet.contains($0.id) }
+            }
             for item in batch {
                 if let idx = self.devices.firstIndex(where: { $0.id == item.id }) {
                     self.devices[idx].name = item.name
@@ -482,8 +639,7 @@ extension BLEManager: CBCentralManagerDelegate {
         }
         log("已连接, 正在发现服务…")
         // 新会话从清空发送队列开始: 断连期间积压的数据不带入新连接
-        outbox.removeAll()
-        chipFullFlag = false
+        clearOutbox()
         setState(.discovering)
         peripheral = p
         p.delegate = self
@@ -513,18 +669,23 @@ extension BLEManager: CBCentralManagerDelegate {
         }
         if let error { log("连接意外断开: \(error.localizedDescription)") }
         else { log("连接已断开") }
+        teardownConnectionOnQueue(configFailReason: "连接已断开")
+        setState(.disconnected)
+    }
+
+    /// 仅 bleQueue: 连接态统一清理(断连回调 / 蓝牙关闭 / 主动断开共用)
+    private func teardownConnectionOnQueue(configFailReason: String) {
         disarmConnectTimeout()
+        cancelPendingScanConnect()
         activePeripheralID = nil
         isReadyOnQueue = false
         updateMain { $0.connectedUUID = nil }
         peripheral = nil
         readChar = nil; writeChar = nil; configChar = nil
-        outbox.removeAll()
-        chipFullFlag = false
-        failPendingSerial("连接已断开")
-        failPendingModem("连接已断开")
+        clearOutbox()
+        failPendingSerial(configFailReason)
+        failPendingModem(configFailReason)
         stopRSSIPolling()
-        setState(.disconnected)
     }
 }
 
@@ -611,11 +772,12 @@ extension BLEManager: CBPeripheralDelegate {
             DispatchQueue.main.async { self.onReceive?(value) }
 
         case CH9140UUID.configCharacteristic:
-            guard let packet = CH9140Protocol.decode(value) else {
-                log("配置通道收到无法识别的报文: \(HexUtil.hexString(value))")
-                return
+            // 帧拆分解码: 容忍固件粘连多帧或夹带噪声, 可解析的帧不陪葬
+            let (packets, residue) = CH9140Protocol.decodeFrames(value)
+            if !residue.isEmpty {
+                log("配置通道丢弃无法识别的 \(residue.count) 字节: \(HexUtil.hexString(residue))")
             }
-            handleConfigPacket(packet)
+            for packet in packets { handleConfigPacket(packet) }
 
         default: break
         }
@@ -641,12 +803,18 @@ extension BLEManager: CBPeripheralDelegate {
             }
 
         case .status(let s):
+            chipFullWatchdog?.cancel()
+            chipFullWatchdog = nil
             chipFullFlag = s.uartSendFull && !s.uartSendEmpty
             DispatchQueue.main.async {
                 self.modemStatus = s
                 self.chipBufferFull = self.chipFullFlag
             }
-            if !chipFullFlag { pumpOutbox() }   // 缓冲区已空, 继续发送
+            if chipFullFlag {
+                armChipFullWatchdog()   // "已空"上报丢失时兜底
+            } else {
+                pumpOutbox()            // 缓冲区已空, 继续发送
+            }
         }
     }
 }

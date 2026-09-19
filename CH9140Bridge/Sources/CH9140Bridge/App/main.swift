@@ -6,6 +6,8 @@
 //  用法:
 //    CH9140Bridge.app/Contents/MacOS/CH9140Bridge --cli \
 //        [--name CH9140BLE2U] [--baud 115200] [--port-name CH9140] [--timeout 45]
+//        [--uuid 53ECEF71-...]   多块同名芯片同场时按 UUID 直连(系统已缓存的设备)
+//  退出: Ctrl+C / SIGTERM 均会清理虚拟串口符号链接后退出。
 //
 
 import Foundation

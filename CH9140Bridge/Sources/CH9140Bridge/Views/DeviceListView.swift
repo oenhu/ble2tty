@@ -288,9 +288,16 @@ private struct RecentDeviceRow: View {
             }
             Spacer()
             if isCurrent {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .font(.caption)
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.caption)
+                    // 已连接的 CH9140 停止广播、不出现在扫描列表,
+                    // 断开入口必须留在最近连接行(否则只能退出 App 来断开)
+                    Button("断开") { model.disconnect() }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                }
             } else {
                 Button("连接") { model.connectRecent(recent) }
                     .buttonStyle(.bordered)

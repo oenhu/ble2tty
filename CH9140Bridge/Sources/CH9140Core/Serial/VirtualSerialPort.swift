@@ -246,6 +246,12 @@ public final class VirtualSerialPort: ObservableObject {
 
     /// 在 writeQueue 上调用
     private func flushInbound(fd: Int32) {
+        // close() 与本队列之间没有同步: 此处捕获的 fd 可能已被关闭并被系统复用,
+        // 写入前重新校验身份, 防止数据落到无关的新 fd 上
+        stateLock.lock()
+        let fdValid = isOpen && masterFD == fd
+        stateLock.unlock()
+        guard fdValid else { return }
         inboundLock.lock()
         var written: UInt64 = 0
         while !inboundBuffer.isEmpty {

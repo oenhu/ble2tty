@@ -5,6 +5,7 @@
 
 import Foundation
 import Combine
+import CoreBluetooth   // CBManagerState(重连的蓝牙门控)
 import AppKit   // NSApplication.willTerminateNotification(进程退出日志收尾)
 
 public enum TerminalLineKind: Sendable, Equatable {
@@ -142,6 +143,7 @@ public final class BridgeModel: ObservableObject {
         // 进程退出收尾: 同步冲刷日志开放行/半字暂存并写会话 footer, 落盘后再退出
         terminateObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: nil) { [weak self] _ in
+            self?.port.close()              // 清理 cu.* 符号链接与 PTY, 退出不残留
             self?.logger.closeSessionSync()
         }
         // 面板初始值 = 设置里的默认参数
@@ -196,10 +198,19 @@ public final class BridgeModel: ObservableObject {
             self?.appendSystem(msg)
         }
 
+        // 蓝牙恢复: 补上因蓝牙关闭而挂起的重连
+        ble.$bluetoothState.dropFirst().sink { [weak self] st in
+            guard let self, st == .poweredOn, self.reconnectPendingBT else { return }
+            self.reconnectPendingBT = false
+            self.scheduleReconnect()
+        }.store(in: &cancellables)
+
         ble.onConnectionChange = { [weak self] state in
             guard let self else { return }
             switch state {
             case .ready:
+                self.reconnectAttempt = 0
+                self.reconnectPendingBT = false
                 self.resetByteCounters()
                 if let uuid = self.ble.connectedUUID {
                     let name = self.ble.connectedDeviceName
@@ -221,24 +232,42 @@ public final class BridgeModel: ObservableObject {
                 }
             case .disconnected, .failed:
                 self.logger.closeSession()
-                if self.settings.autoReconnect, let target = self.reconnectTarget {
-                    self.appendSystem("2 秒后尝试自动重连 \(target.name) …")
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-                        guard let self else { return }
-                        // 排除进行态与已恢复连接即可; .failed 是连接尝试的常见终态,
-                        // 也要放行重连(否则超时/失败后重连承诺永不兑现)
-                        switch self.ble.connectionState {
-                        case .connecting, .discovering, .ready:
-                            return
-                        case .disconnected, .failed:
-                            break
-                        }
-                        self.ble.connect(uuid: target.uuid, name: target.name)
-                    }
-                }
+                self.scheduleReconnect()
             default:
                 break
             }
+        }
+    }
+
+    // MARK: - 自动重连
+
+    /// 已尝试次数(连接就绪/用户手动操作时清零)
+    private var reconnectAttempt = 0
+    /// 蓝牙关闭导致的挂起重连(蓝牙恢复 poweredOn 时补发)
+    private var reconnectPendingBT = false
+
+    /// 自动重连: 指数退避(2s 起, 30s 封顶, 不限次);
+    /// 触发时蓝牙未开启则挂起, 待蓝牙恢复后由 $bluetoothState 观察者补发
+    private func scheduleReconnect() {
+        guard settings.autoReconnect, let target = reconnectTarget else { return }
+        reconnectAttempt += 1
+        let delay = min(2.0 * pow(2.0, Double(reconnectAttempt - 1)), 30.0)
+        appendSystem("\(Int(delay)) 秒后尝试自动重连 \(target.name)(第 \(reconnectAttempt) 次)…")
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self else { return }
+            // 排除进行态与已恢复连接即可; .failed 是连接尝试的常见终态, 也要放行重连
+            switch self.ble.connectionState {
+            case .connecting, .discovering, .ready:
+                return
+            case .disconnected, .failed:
+                break
+            }
+            guard self.ble.bluetoothState == .poweredOn else {
+                self.appendSystem("蓝牙未开启, 待恢复后重连 \(target.name)")
+                self.reconnectPendingBT = true
+                return
+            }
+            self.ble.connect(uuid: target.uuid, name: target.name)
         }
     }
 
@@ -291,17 +320,23 @@ public final class BridgeModel: ObservableObject {
 
     public func connect(_ device: DiscoveredDevice) {
         reconnectTarget = (device.id, device.name)
+        reconnectAttempt = 0
+        reconnectPendingBT = false
         ble.connect(device)
     }
 
     /// 连接"最近连接"列表里的设备(无需先扫描)
     public func connectRecent(_ device: RecentDevice) {
         reconnectTarget = (device.uuid, device.name)
+        reconnectAttempt = 0
+        reconnectPendingBT = false
         ble.connect(uuid: device.uuid, name: device.name)
     }
 
     public func disconnect() {
         reconnectTarget = nil
+        reconnectAttempt = 0
+        reconnectPendingBT = false
         ble.disconnect()
     }
 
@@ -410,6 +445,14 @@ public final class BridgeModel: ObservableObject {
                        cr: settings.logCleanCRMode, bs: settings.logCleanBSMode,
                        includeClean: settings.logSentData)
         }
+    }
+
+    /// 终端监视页文本解码: 严格 UTF-8 优先; 开启中文兼容时回退 GBK; 再失败宽松解码。
+    /// (此前用 printableASCII 把 ≥0x7F 字节全部替换为 ".", 中文控制台输出不可读)
+    public func displayText(_ data: Data) -> String {
+        if let s = String(bytes: data, encoding: .utf8) { return s }
+        if settings.logGBKCompatible, let s = String(bytes: data, encoding: SessionLogger.gbkEncoding) { return s }
+        return String(decoding: data, as: UTF8.self)
     }
 
     // MARK: - 终端行管理
