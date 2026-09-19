@@ -1,8 +1,9 @@
 # BLE2TTY — CH9140 蓝牙串口桥 (macOS)
 
-把 **CH9140 蓝牙转串口芯片** 桥接成 Mac 上的**虚拟串口**, 配合原生 GUI 控制面板,
-用于调试交换机/路由器等网络设备的 Console 口, 兼容任意串口工具
-(screen / minicom / CoolTerm / PuTTY / SecureCRT 等)。
+**无线 Console 调试终端**: 把 **CH9140 蓝牙转串口芯片** 桥接成 Mac 上的**虚拟串口**,
+用于调试交换机/路由器等网络设备的 Console 口。内置**终端仿真器**(SwiftTerm, 键盘直连)、
+**收发监视器**(HEX/文本, 中文 UTF-8/GBK 显示)与**会话日志**(raw+clean 双份),
+同时兼容任意串口工具(screen / minicom / CoolTerm / PuTTY / SecureCRT 等)。
 
 协议实现对照 WCH 官方资料(版权属 WCH 沁恒, 不随本仓库分发, 请从 [WCH 官网](https://www.wch.cn) 下载):
 - `BleUartLib/iOS` CH9140Lib 官方 iOS 库(连接/配置逻辑逐字节对齐)
