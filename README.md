@@ -1,4 +1,21 @@
-# BLE2TTY — CH9140 蓝牙串口桥 (macOS)
+<div align="center">
+
+<img src="assets/logo.png" width="280" alt="BLE2TTY Logo">
+
+# BLE2TTY
+
+**无线 Console 调试终端** · 把 Console 线剪掉
+
+[![Release](https://img.shields.io/github/v/release/oenhu/ble2tty?display_name=tag&label=release&color=0d7fde)](https://github.com/oenhu/ble2tty/releases)
+[![Platform](https://img.shields.io/badge/platform-macOS%2013%2B-000000?logo=apple&logoColor=white)](https://github.com/oenhu/ble2tty)
+[![Swift](https://img.shields.io/badge/swift-5.9+-f05138?logo=swift&logoColor=white)](https://github.com/oenhu/ble2tty)
+[![License](https://img.shields.io/github/license/oenhu/ble2tty?color=34a853)](LICENSE)
+
+**CH9140 蓝牙转串口 ↔ Mac 虚拟串口 (PTY)** · 内置终端仿真 / 收发监视 / 会话日志 · GUI + CLI
+
+</div>
+
+---
 
 **无线 Console 调试终端**: 把 **CH9140 蓝牙转串口芯片** 桥接成 Mac 上的**虚拟串口**,
 用于调试交换机/路由器等网络设备的 Console 口。内置**终端仿真器**(SwiftTerm, 键盘直连)、
